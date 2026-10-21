@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import express from "express";
 
 import { app } from "../src/app";
-import { Prisma, type PrismaClient, type Task, type TaskAction } from "../src/generated/prisma/client";
+import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask } from "../src/generated/prisma/client";
 import { errorHandler } from "../src/middleware/error-handler";
 import { createRequestLogger } from "../src/middleware/request-logger";
 import { createLogger } from "../src/lib/logger";
@@ -22,8 +22,8 @@ const input = {
 // Transactional in-memory Prisma boundary: HTTP tests need no database credentials.
 // Writes are available only on tx; a failed event discards the entire draft.
 async function fixture(t: TestContext) {
-  let state: { tasks: Task[]; actions: TaskAction[] } = { tasks: [], actions: [] };
-  let failEvent = false;
+  let state: { tasks: Task[]; actions: TaskAction[]; subtasks: Subtask[] } = { tasks: [], actions: [], subtasks: [] };
+  let writesBeforeFailure: number | undefined;
   let conflicts = 0;
   let attempts = 0;
   const delegates = (db: typeof state) => ({
@@ -53,13 +53,34 @@ async function fixture(t: TestContext) {
     },
     taskAction: {
       async create({ data }: { data: Omit<TaskAction, "id" | "timestamp"> }) {
-        if (failEvent) throw new Error("Simulated event write failure");
+        if (writesBeforeFailure !== undefined && writesBeforeFailure-- <= 0) throw new Error("Simulated event write failure");
         const action = { id: randomUUID(), timestamp: new Date(), ...data };
         db.actions.push(action);
         return action;
       },
       async findMany({ where }: { where: { taskId: string } }) {
         return structuredClone(db.actions.filter((action) => action.taskId === where.taskId));
+      },
+    },
+    subtask: {
+      async findMany({ where }: { where: { taskId: string; deletedAt: null } }) {
+        return structuredClone(db.subtasks.filter((subtask) => subtask.taskId === where.taskId && subtask.deletedAt === null));
+      },
+      async findFirst({ where }: { where: { id: string; taskId: string; deletedAt: null } }) {
+        return structuredClone(db.subtasks.find((subtask) => subtask.id === where.id && subtask.taskId === where.taskId && subtask.deletedAt === null) ?? null);
+      },
+      async create({ data }: { data: Pick<Subtask, "taskId" | "title" | "estimatedDurationMinutes"> & Partial<Subtask> }) {
+        const subtask: Subtask = {
+          id: randomUUID(), status: "TODO", cancellationNote: null, deletedAt: null,
+          createdAt: new Date(), updatedAt: new Date(), ...data,
+        };
+        db.subtasks.push(subtask);
+        return structuredClone(subtask);
+      },
+      async update({ where, data }: { where: { id: string }; data: Partial<Subtask> }) {
+        const subtask = db.subtasks.find((subtask) => subtask.id === where.id)!;
+        Object.assign(subtask, data, { updatedAt: new Date() });
+        return structuredClone(subtask);
       },
     },
   });
@@ -96,12 +117,19 @@ async function fixture(t: TestContext) {
     return { status: response.status, body: response.status === 204 ? null : await response.json() };
   }
   return {
-    request, logs, state: () => state, failEvents: () => { failEvent = true; },
+    request, logs, state: () => state, failEvents: (after = 0) => { writesBeforeFailure = after; },
     conflicts: (count: number) => { conflicts = count; }, attempts: () => attempts,
     async create() {
       const result = await request("POST", "", input);
       assert.equal(result.status, 201);
       return result.body as Task & { isCompleted: boolean };
+    },
+    async createSubtask(taskId: string, data: Record<string, unknown> = {}) {
+      const result = await request("POST", `/${taskId}/subtasks`, {
+        title: "Subtask", estimatedDurationMinutes: 10, ...data,
+      });
+      assert.equal(result.status, 201, JSON.stringify(result.body));
+      return result.body as Subtask;
     },
   };
 }
@@ -335,4 +363,254 @@ test("app mounts the module at /api/tasks", async (t) => {
   const health = await fetch(`${base}/api/health`);
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: "ok" });
+});
+
+test("subtask CRUD validates fields, cancellation and UUIDs without changing the task response shape", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const path = `/${parent.id}/subtasks`;
+  assert.deepEqual(await f.request("GET", path), { status: 200, body: [] });
+  for (const data of [
+    {}, { title: "Missing duration" }, { estimatedDurationMinutes: 5 },
+    ...["", " ", "x".repeat(161), null].map((title) => ({ title, estimatedDurationMinutes: 5 })),
+    ...[0, -1, 1.1, "10", null, 2_147_483_648].map((estimatedDurationMinutes) => ({ title: "x", estimatedDurationMinutes })),
+    ...["plannedAt", "dueAt", "priority", "deletedAt", "taskId", "id", "isCompleted"].map((key) => ({ title: "x", estimatedDurationMinutes: 5, [key]: "unexpected" })),
+    { title: "x", estimatedDurationMinutes: 5, status: "UNKNOWN" },
+    { title: "x", estimatedDurationMinutes: 5, status: "CANCELED" },
+    { title: "x", estimatedDurationMinutes: 5, status: "CANCELED", cancellationNote: " \t " },
+  ]) {
+    const result = await f.request("POST", path, data);
+    assert.equal(result.status, 400, JSON.stringify(data));
+    assert.equal(result.body.error.message, "Invalid task data.");
+    assert.ok(Array.isArray(result.body.error.details));
+  }
+  const subtask = await f.createSubtask(parent.id, { title: "  First  " });
+  assert.match(subtask.id, /^[0-9a-f-]{36}$/);
+  assert.equal(subtask.taskId, parent.id);
+  assert.equal(subtask.title, "First");
+  assert.equal(subtask.status, "TODO");
+  assert.equal(subtask.cancellationNote, null);
+  assert.equal(subtask.deletedAt, null);
+  assert.ok(subtask.createdAt && subtask.updatedAt);
+  for (const key of ["plannedAt", "dueAt", "priority", "isCompleted"]) assert.ok(!(key in subtask));
+  const item = `${path}/${subtask.id}`;
+  for (const body of [{}, { title: " " }, { status: "UNKNOWN" }, { status: "CANCELED" },
+    { status: "CANCELED", cancellationNote: " " }, { cancellationNote: null },
+    { estimatedDurationMinutes: 0 }, { dueAt: null }, { priority: "HIGH" }]) {
+    assert.equal((await f.request("PATCH", item, body)).status, 400, JSON.stringify(body));
+  }
+  const canceled = await f.request("PATCH", item, { title: "  Renamed  ", status: "CANCELED", cancellationNote: "  Reason  " });
+  assert.equal(canceled.status, 200);
+  assert.equal(canceled.body.title, "Renamed");
+  assert.equal(canceled.body.cancellationNote, "Reason");
+  const reopened = await f.request("PATCH", item, { status: "PAUSED" });
+  assert.equal(reopened.body.cancellationNote, "Reason");
+  assert.equal((await f.request("GET", path)).body.length, 1);
+  assert.deepEqual(Object.keys((await f.request("GET", `/${parent.id}`)).body).sort(), Object.keys(parent).sort());
+  for (const method of ["GET", "POST", "PATCH", "DELETE"]) {
+    const suffix = method === "PATCH" || method === "DELETE" ? `/${subtask.id}` : "";
+    assert.deepEqual(await f.request(method, `/invalid/subtasks${suffix}`, method === "GET" ? undefined : {}), {
+      status: 400, body: { error: { message: "Invalid task id." } },
+    });
+  }
+  assert.deepEqual(await f.request("PATCH", `${path}/invalid`, {}), {
+    status: 400, body: { error: { message: "Invalid subtask id." } },
+  });
+  assert.equal((await f.request("DELETE", item)).status, 204);
+  assert.deepEqual((await f.request("GET", path)).body, []);
+  assert.ok(f.state().subtasks[0].deletedAt);
+  assert.equal((await f.request("PATCH", item, { title: "Hidden" })).status, 404);
+  assert.equal((await f.request("DELETE", item)).status, 404);
+  const history = (await f.request("GET", `/${parent.id}/history`)).body as TaskAction[];
+  for (const type of ["SUBTASK_CREATED", "SUBTASK_EDITED", "SUBTASK_STATUS_CHANGED", "SUBTASK_DELETED"]) {
+    assert.ok(history.some((entry) => entry.type === type && (entry.metadata as { subtaskId?: string }).subtaskId === subtask.id));
+  }
+});
+
+test("subtasks enforce ownership and missing, deleted and archived parent rules", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const other = await f.create();
+  const subtask = await f.createSubtask(parent.id);
+  for (const taskId of [other.id, randomUUID()]) {
+    for (const method of ["PATCH", "DELETE"]) {
+      assert.equal((await f.request(method, `/${taskId}/subtasks/${subtask.id}`, { title: "Wrong parent" })).status, 404);
+    }
+  }
+  assert.equal((await f.request("GET", `/${randomUUID()}/subtasks`)).status, 404);
+  assert.equal((await f.request("POST", `/${randomUUID()}/subtasks`, { title: "x", estimatedDurationMinutes: 1 })).status, 404);
+  await f.request("PATCH", `/${parent.id}`, { archived: true });
+  const archived = structuredClone(f.state());
+  assert.equal((await f.request("GET", `/${parent.id}/subtasks`)).status, 200);
+  for (const method of ["POST", "PATCH", "DELETE"]) {
+    const path = `/${parent.id}/subtasks${method === "POST" ? "" : `/${subtask.id}`}`;
+    assert.equal((await f.request(method, path, { title: "x", estimatedDurationMinutes: 1 })).status, 409);
+  }
+  assert.deepEqual(f.state(), archived);
+  await f.request("DELETE", `/${parent.id}`);
+  const deleted = structuredClone(f.state());
+  for (const method of ["GET", "POST", "PATCH", "DELETE"]) {
+    const path = `/${parent.id}/subtasks${method === "PATCH" || method === "DELETE" ? `/${subtask.id}` : ""}`;
+    assert.equal((await f.request(method, path, method === "GET" ? undefined : { title: "x", estimatedDurationMinutes: 1 })).status, 404);
+  }
+  assert.deepEqual(f.state(), deleted);
+});
+
+test("parent duration sums every live status, blocks manual edits and keeps the final sum", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const children: Subtask[] = [];
+  for (const status of ["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED"]) {
+    children.push(await f.createSubtask(parent.id, { status, estimatedDurationMinutes: 5,
+      ...(status === "CANCELED" ? { cancellationNote: "Reason" } : {}),
+    }));
+  }
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.estimatedDurationMinutes, 30);
+  const before = structuredClone(f.state());
+  assert.equal((await f.request("PATCH", `/${parent.id}`, { estimatedDurationMinutes: 30, title: "Blocked" })).status, 409);
+  assert.deepEqual(f.state(), before);
+  assert.equal((await f.request("PATCH", `/${parent.id}`, { title: "Allowed" })).status, 200);
+  assert.equal((await f.request("PATCH", `/${parent.id}/subtasks/${children[0].id}`, { estimatedDurationMinutes: 12 })).status, 200);
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.estimatedDurationMinutes, 37);
+  const durationAction = f.state().actions.filter((entry) => entry.type === "EDITED").at(-1)!;
+  assert.deepEqual(durationAction.metadata, {
+    subtaskId: children[0].id, before: { estimatedDurationMinutes: 30 }, after: { estimatedDurationMinutes: 37 },
+  });
+  for (const child of children.slice(1)) assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${child.id}`)).status, 204);
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.estimatedDurationMinutes, 12);
+  await f.request("PATCH", `/${parent.id}`, { status: "PAUSED" });
+  await f.request("DELETE", `/${parent.id}/subtasks/${children[0].id}`);
+  const last = (await f.request("GET", `/${parent.id}`)).body;
+  assert.equal(last.estimatedDurationMinutes, 12);
+  assert.equal(last.status, "PAUSED");
+  assert.equal((await f.request("PATCH", `/${parent.id}`, { estimatedDurationMinutes: 99 })).status, 200);
+  await f.createSubtask(parent.id, { estimatedDurationMinutes: 7 });
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.estimatedDurationMinutes, 7);
+});
+
+test("subtask changes synchronize active and completed statuses and preserve other combinations", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const first = await f.createSubtask(parent.id);
+  const second = await f.createSubtask(parent.id);
+  const patch = async (id: string, status: string) => {
+    const result = await f.request("PATCH", `/${parent.id}/subtasks/${id}`, {
+      status, ...(status === "CANCELED" ? { cancellationNote: "Reason" } : {}),
+    });
+    assert.equal(result.status, 200);
+  };
+  const status = async () => (await f.request("GET", `/${parent.id}`)).body.status;
+  await patch(first.id, "IN_PROGRESS");
+  assert.equal(await status(), "IN_PROGRESS");
+  await patch(first.id, "DONE");
+  assert.equal(await status(), "IN_PROGRESS");
+  await patch(second.id, "DONE");
+  assert.equal(await status(), "DONE");
+  await patch(first.id, "TODO");
+  assert.equal(await status(), "TODO");
+  for (const next of ["PAUSED", "POSTPONED", "CANCELED"]) {
+    await f.request("PATCH", `/${parent.id}`, { status: next, ...(next === "CANCELED" ? { cancellationNote: "Parent reason" } : {}) });
+    await patch(first.id, next);
+    assert.equal(await status(), next);
+  }
+  await patch(first.id, "IN_PROGRESS");
+  assert.equal(await status(), "IN_PROGRESS");
+  await f.request("DELETE", `/${parent.id}/subtasks/${first.id}`);
+  assert.equal(await status(), "DONE");
+  const autoStatus = f.state().actions.filter((entry) => entry.type === "STATUS_CHANGED").at(-1)!;
+  assert.deepEqual(autoStatus.metadata, {
+    subtaskId: first.id,
+    before: { status: "IN_PROGRESS", cancellationNote: "Parent reason" },
+    after: { status: "DONE", cancellationNote: "Parent reason" },
+  });
+});
+
+test("manual parent statuses never cascade; adding or reopening under DONE follows precedence", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const child = await f.createSubtask(parent.id, { status: "IN_PROGRESS" });
+  for (const status of ["PAUSED", "POSTPONED", "CANCELED", "TODO", "DONE"]) {
+    const before = structuredClone(f.state().subtasks);
+    await f.request("PATCH", `/${parent.id}`, { status, ...(status === "CANCELED" ? { cancellationNote: "Reason" } : {}) });
+    assert.deepEqual(f.state().subtasks, before);
+  }
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.isCompleted, true);
+  assert.equal((await f.request("GET", `/${parent.id}/subtasks`)).body[0].status, "IN_PROGRESS");
+  const added = await f.createSubtask(parent.id);
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "IN_PROGRESS");
+  await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "DONE" });
+  await f.request("PATCH", `/${parent.id}/subtasks/${added.id}`, { status: "DONE" });
+  const todo = await f.createSubtask(parent.id);
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "TODO");
+  await f.request("PATCH", `/${parent.id}/subtasks/${todo.id}`, { status: "DONE" });
+  await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "CANCELED", cancellationNote: "Canceled without reopening" });
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "DONE");
+  await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "TODO" });
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "TODO");
+  await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "DONE" });
+  await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "PAUSED" });
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "TODO");
+  await f.request("PATCH", `/${parent.id}`, { isCompleted: true });
+  assert.equal(f.state().subtasks.find((subtask) => subtask.id === child.id)!.status, "PAUSED");
+  await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { title: "Edit only" });
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "DONE");
+  await f.createSubtask(parent.id, { status: "IN_PROGRESS" });
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "IN_PROGRESS");
+});
+
+test("duration overflow rejects the whole subtask transaction", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const child = await f.createSubtask(parent.id, { estimatedDurationMinutes: 2_147_483_646 });
+  const other = await f.createSubtask(parent.id, { estimatedDurationMinutes: 1 });
+  const before = structuredClone(f.state());
+  assert.equal((await f.request("POST", `/${parent.id}/subtasks`, { title: "Overflow", estimatedDurationMinutes: 1 })).status, 400);
+  assert.deepEqual(f.state(), before);
+  assert.equal((await f.request("PATCH", `/${parent.id}/subtasks/${other.id}`, { estimatedDurationMinutes: 2 })).status, 400);
+  assert.deepEqual(f.state(), before);
+  assert.equal(child.estimatedDurationMinutes, 2_147_483_646);
+});
+
+test("subtask creation, edit and deletion roll back even when a later journal write fails", async (t) => {
+  for (const operation of ["create", "update", "delete"]) {
+    const eventCount = operation === "update" ? 4 : 3;
+    for (let failureAt = 0; failureAt < eventCount; failureAt++) {
+      const f = await fixture(t);
+      const parent = await f.create();
+      let child: Subtask | undefined;
+      if (operation === "update") {
+        child = await f.createSubtask(parent.id, { status: "DONE", estimatedDurationMinutes: 5 });
+      } else if (operation === "delete") {
+        await f.createSubtask(parent.id, { status: "DONE", estimatedDurationMinutes: 5 });
+        child = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 10 });
+      } else {
+        await f.request("PATCH", `/${parent.id}`, { status: "DONE" });
+      }
+      const before = structuredClone(f.state());
+      f.failEvents(failureAt);
+      const result = operation === "create"
+        ? await f.request("POST", `/${parent.id}/subtasks`, { title: "New", estimatedDurationMinutes: 10 })
+        : operation === "update"
+          ? await f.request("PATCH", `/${parent.id}/subtasks/${child!.id}`, { title: "Edit", status: "TODO", estimatedDurationMinutes: 20 })
+          : await f.request("DELETE", `/${parent.id}/subtasks/${child!.id}`);
+      assert.equal(result.status, 500, `${operation}, journal index ${failureAt}`);
+      assert.deepEqual(result.body, { error: { message: "Internal server error." } });
+      assert.deepEqual(f.state(), before, `${operation}, journal index ${failureAt}`);
+    }
+  }
+});
+
+test("subtask transactions retry serialization conflicts and expose exhausted conflicts as 409", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const attempts = f.attempts();
+  f.conflicts(2);
+  const child = await f.createSubtask(parent.id);
+  assert.equal(f.attempts() - attempts, 3);
+  assert.equal(f.state().subtasks.length, 1);
+  assert.equal(f.state().actions.filter((entry) => entry.type === "SUBTASK_CREATED").length, 1);
+  const before = structuredClone(f.state());
+  f.conflicts(3);
+  assert.equal((await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { estimatedDurationMinutes: 20 })).status, 409);
+  assert.deepEqual(f.state(), before);
 });

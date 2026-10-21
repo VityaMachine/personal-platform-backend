@@ -8,6 +8,8 @@ const dateTime = z.iso.datetime({ offset: true }).transform((value) => new Date(
 const duration = z.number().int().positive().max(2_147_483_647);
 const note = z.string().trim().min(1);
 
+export const taskFields = { title, duration, note };
+
 export const createTaskSchema = z.strictObject({
   title,
   description: z.string().nullable().optional(),

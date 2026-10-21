@@ -6,6 +6,7 @@ import {
   type TasksTransactionRepository,
 } from "./tasks.repository";
 import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./tasks.schemas";
+import { createSubtasksService } from "./subtasks.service";
 
 export function createTasksService(repository: TasksRepository) {
   async function findTask(id: string, reader: Pick<TasksRepository, "findFirst"> = repository) {
@@ -26,6 +27,7 @@ export function createTasksService(repository: TasksRepository) {
   }
 
   return {
+    subtasks: createSubtasksService({ findTask, transaction }),
     list(query: ListTasksInput) {
       return repository.findMany({
         deletedAt: null,
@@ -50,6 +52,9 @@ export function createTasksService(repository: TasksRepository) {
       const { archived, isCompleted, ...fields } = input;
       return transaction(async (tx) => {
         const before = await findTask(id, tx);
+        if (fields.estimatedDurationMinutes !== undefined && (await tx.findSubtasks(id)).length) {
+          throw new ApiError(409, "Task duration is calculated from its subtasks.");
+        }
         const data: Partial<Task> = { ...fields };
         const status = fields.status ?? (isCompleted === undefined ? undefined : isCompleted ? "DONE" : "TODO");
         if (status !== undefined) data.status = status;

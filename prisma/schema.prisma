@@ -31,6 +31,10 @@ enum TaskActionType {
   ARCHIVED
   UNARCHIVED
   DELETED
+  SUBTASK_CREATED
+  SUBTASK_EDITED
+  SUBTASK_STATUS_CHANGED
+  SUBTASK_DELETED
 }
 
 model Task {
@@ -48,8 +52,24 @@ model Task {
   createdAt                DateTime   @default(now()) @db.Timestamptz(3)
   updatedAt                DateTime   @updatedAt @db.Timestamptz(3)
   actions                  TaskAction[]
+  subtasks                 Subtask[]
 
   @@index([deletedAt, archivedAt, createdAt])
+}
+
+model Subtask {
+  id                       String     @id @default(uuid()) @db.Uuid
+  taskId                   String     @db.Uuid
+  title                    String     @db.VarChar(160)
+  status                   TaskStatus @default(TODO)
+  estimatedDurationMinutes Int
+  cancellationNote         String?    @db.Text
+  createdAt                DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime   @updatedAt @db.Timestamptz(3)
+  deletedAt                DateTime?  @db.Timestamptz(3)
+  task                     Task       @relation(fields: [taskId], references: [id], onDelete: Restrict)
+
+  @@index([taskId, deletedAt, createdAt])
 }
 
 model TaskAction {

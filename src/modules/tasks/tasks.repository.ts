@@ -25,6 +25,21 @@ function createTaskQueries(db: Prisma.TransactionClient) {
         orderBy: [{ timestamp: "asc" }, { id: "asc" }],
       });
     },
+    findSubtasks(taskId: string) {
+      return db.subtask.findMany({
+        where: { taskId, deletedAt: null },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      });
+    },
+    findSubtask(taskId: string, id: string) {
+      return db.subtask.findFirst({ where: { id, taskId, deletedAt: null } });
+    },
+    createSubtask(taskId: string, data: Omit<Prisma.SubtaskUncheckedCreateInput, "taskId">) {
+      return db.subtask.create({ data: { ...data, taskId } });
+    },
+    updateSubtask(id: string, data: Prisma.SubtaskUpdateInput) {
+      return db.subtask.update({ where: { id }, data });
+    },
   };
 }
 
