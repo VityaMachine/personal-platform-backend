@@ -8,6 +8,7 @@ import express from "express";
 import { app } from "../src/app";
 import { Prisma, type PrismaClient, type Task, type TaskAction } from "../src/generated/prisma/client";
 import { errorHandler } from "../src/middleware/error-handler";
+import { requestLogger } from "../src/middleware/request-logger";
 import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
 
 const input = {
@@ -35,7 +36,7 @@ async function fixture(t: TestContext) {
       },
       async create({ data }: { data: Partial<Task> }) {
         const task: Task = {
-          id: randomUUID(), title: "", description: null, status: "TODO",
+          id: randomUUID(), title: "", description: null, status: "TODO", priority: "MEDIUM",
           plannedAt: null, dueAt: null, estimatedDurationMinutes: 1,
           cancellationNote: null, archivedAt: null, deletedAt: null,
           createdAt: new Date(), updatedAt: new Date(), ...data,
@@ -77,6 +78,7 @@ async function fixture(t: TestContext) {
     },
   } as unknown as PrismaClient;
   const app = express();
+  app.use(requestLogger);
   app.use(express.json());
   app.use("/api/tasks", createTasksRouter(() => client));
   app.use(errorHandler);
@@ -102,7 +104,7 @@ async function fixture(t: TestContext) {
   };
 }
 
-test("creation requires planning, validates types and logs normalized values", async (t) => {
+test("creation requires deadline and duration, validates types and logs normalized values", async (t) => {
   const f = await fixture(t);
   const invalid: unknown[] = [
     {}, { ...input, title: "  " }, { ...input, title: "x".repeat(161) },
@@ -111,18 +113,57 @@ test("creation requires planning, validates types and logs normalized values", a
     { ...input, dueAt: "2026-10-22" }, { ...input, dueAt: "2026-10-22T10:00:00" },
     ...[0, -1, 1.5, "30", null, 2_147_483_648].map((estimatedDurationMinutes) => ({ ...input, estimatedDurationMinutes })),
     { ...input, status: "DONE" },
-    ...["plannedAt", "dueAt", "estimatedDurationMinutes"].map((key) => Object.fromEntries(Object.entries(input).filter(([name]) => name !== key))),
+    ...["dueAt", "estimatedDurationMinutes"].map((key) => Object.fromEntries(Object.entries(input).filter(([name]) => name !== key))),
   ];
   for (const body of invalid) assert.equal((await f.request("POST", "", body)).status, 400, JSON.stringify(body));
   assert.equal(f.attempts(), 0, "validation must finish before opening a transaction");
   const task = await f.create();
   assert.equal(task.status, "TODO");
+  assert.equal(task.priority, "MEDIUM");
   assert.equal(task.isCompleted, false);
   assert.equal(task.plannedAt, "2026-10-22T06:00:00.000Z");
   const [action] = f.state().actions;
   assert.equal(action.type, "CREATED");
   assert.equal(action.taskId, task.id);
   assert.deepEqual(action.metadata, { before: null, after: JSON.parse(JSON.stringify(f.state().tasks[0])) });
+});
+
+test("creation without plannedAt stores and returns null with MEDIUM priority", async (t) => {
+  const f = await fixture(t);
+  const { plannedAt, ...unplanned } = input;
+  const result = await f.request("POST", "", unplanned);
+  assert.equal(result.status, 201);
+  assert.equal(result.body.plannedAt, null);
+  assert.equal(result.body.priority, "MEDIUM");
+  assert.equal(f.state().tasks[0].plannedAt, null);
+  const action = f.state().actions[0];
+  assert.deepEqual(action.metadata, { before: null, after: JSON.parse(JSON.stringify(f.state().tasks[0])) });
+});
+
+test("all priorities create and update with transactional before/after events", async (t) => {
+  const f = await fixture(t);
+  for (const priority of ["LOW", "MEDIUM", "HIGH", "CRITICAL"]) {
+    const created = await f.request("POST", "", { ...input, priority });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.priority, priority);
+    assert.equal((await f.request("GET", `/${created.body.id}`)).body.priority, priority);
+    assert.equal((await f.request("GET")).body.at(-1).priority, priority);
+    const next = priority === "CRITICAL" ? "LOW" : "CRITICAL";
+    const updated = await f.request("PATCH", `/${created.body.id}`, { priority: next });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.priority, next);
+    const history = await f.request("GET", `/${created.body.id}/history`);
+    assert.equal(history.body.at(-1).type, "EDITED");
+    assert.deepEqual(history.body.at(-1).metadata, { before: { priority }, after: { priority: next } });
+    const count = f.state().actions.length;
+    await f.request("PATCH", `/${created.body.id}`, { priority: next });
+    assert.equal(f.state().actions.length, count);
+  }
+  const task = f.state().tasks[0];
+  for (const priority of ["URGENT", "low", null, 1]) {
+    assert.equal((await f.request("POST", "", { ...input, priority })).status, 400);
+    assert.equal((await f.request("PATCH", `/${task.id}`, { priority })).status, 400);
+  }
 });
 
 test("all statuses and legacy PATCH map correctly; conflicts and invalid edits are rejected", async (t) => {
@@ -211,12 +252,12 @@ test("event failures roll back task creation, edits, status, archive, restoratio
   const log = t.mock.method(console, "error", () => {});
   assert.equal((await f.request("POST", "", input)).status, 500);
   for (const [id, data] of [
-    [task.id, { title: "Changed" }], [task.id, { status: "DONE" }],
+    [task.id, { title: "Changed" }], [task.id, { status: "DONE" }], [task.id, { priority: "HIGH" }],
     [task.id, { archived: true }], [archived.id, { archived: false }],
   ] as const) assert.equal((await f.request("PATCH", `/${id}`, data)).status, 500);
   assert.equal((await f.request("DELETE", `/${task.id}`)).status, 500);
   assert.deepEqual(f.state(), before);
-  assert.equal(log.mock.callCount(), 6);
+  assert.equal(log.mock.callCount(), 7);
 });
 
 test("deleting an active task preserves its status and hides it from both lists", async (t) => {

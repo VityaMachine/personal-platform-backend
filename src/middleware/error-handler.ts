@@ -8,6 +8,14 @@ export const errorHandler: ErrorRequestHandler = (
   response,
   next,
 ) => {
+  // Allowlisted categories only: exception messages/stacks can contain secrets.
+  const errorType = error instanceof ApiError ? "api_error"
+    : error instanceof ZodError ? "validation_error"
+    : error?.type === "entity.parse.failed" ? "invalid_json"
+    : error?.type === "entity.too.large" ? "body_too_large"
+    : "internal_error";
+  console.error(JSON.stringify({ requestId: response.locals.requestId, error: { type: errorType } }));
+
   if (response.headersSent) {
     next(error);
     return;
@@ -38,6 +46,5 @@ export const errorHandler: ErrorRequestHandler = (
     return;
   }
 
-  console.error("API request failed:", error);
   response.status(500).json({ error: { message: "Internal server error." } });
 };

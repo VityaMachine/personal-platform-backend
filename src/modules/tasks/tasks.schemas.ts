@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { TaskStatus } from "../../generated/prisma/client";
+import { TaskPriority, TaskStatus } from "../../generated/prisma/client";
 import { ApiError } from "../../lib/api-error";
 
 const title = z.string().trim().min(1).max(160);
@@ -11,7 +11,8 @@ const note = z.string().trim().min(1);
 export const createTaskSchema = z.strictObject({
   title,
   description: z.string().nullable().optional(),
-  plannedAt: dateTime,
+  plannedAt: dateTime.optional(),
+  priority: z.enum(TaskPriority).default("MEDIUM"),
   dueAt: dateTime,
   estimatedDurationMinutes: duration,
 });
@@ -20,6 +21,7 @@ export const updateTaskSchema = z.strictObject({
   title: title.optional(),
   description: z.string().nullable().optional(),
   status: z.enum(TaskStatus).optional(),
+  priority: z.enum(TaskPriority).optional(),
   isCompleted: z.boolean().optional(),
   plannedAt: dateTime.nullable().optional(),
   dueAt: dateTime.nullable().optional(),

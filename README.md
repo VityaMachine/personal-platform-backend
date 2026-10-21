@@ -35,16 +35,20 @@ session pooler URL у `DIRECT_URL`. Transaction pooler на порту 6543 не
 Prisma CLI читає `DIRECT_URL` з `prisma.config.ts`; клієнт читає `DATABASE_URL`
 через ліниву функцію `getPrisma()` у `src/lib/prisma.ts`.
 
-Модель `Task` зберігає статус, планування, причину скасування та незалежні
+Модель `Task` зберігає статус, пріоритет, планування, причину скасування та незалежні
 `archivedAt` / `deletedAt`. `TaskAction` зберігає журнал із UUID, `taskId`, `type`,
 `timestamp` і JSON `metadata: { before, after }`. UUID генерує Prisma;
 `updatedAt` автоматично оновлюється під час записів через Prisma Client.
 
-Початкова міграція `20261019000000_create_task` не змінена. Нова міграція
+Початкова міграція `20261019000000_create_task` не змінена. Попередня міграція
 `20261021000000_task_lifecycle` **очищає лише наявні тестові записи `Task`**,
 бо вони не мають обов'язкової тривалості та даних планування. Інші таблиці не
 видаляються. Додані SQL CHECK-обмеження для додатної тривалості й причини
 скасування; зміни міграції виконуються в одній SQL-транзакції.
+
+Нова адитивна міграція `20261021010000_task_priority` додає enum `TaskPriority`
+та обов'язковий `Task.priority` із default `MEDIUM`, зокрема для всіх наявних задач.
+Вона не видаляє таблиць або записів `Task` / `TaskAction`. Попередні міграції не змінені.
 
 Для ручного застосування підготовлених міграцій із кореня backend виконайте:
 
@@ -54,6 +58,8 @@ npm run prisma:migrate:deploy
 
 Команда використовує налаштований `DIRECT_URL`, застосовує лише ще не застосовані
 міграції та не потребує shadow database. Не використовуйте `migrate reset`.
+Перед застосуванням перевірте список незастосованих міграцій: команда застосовує
+їх усі, включно з попередньою `task_lifecycle`, якщо її ще не застосовано.
 
 Перевірка схеми та генерація клієнта не потребують `.env` і не змінюють БД:
 
@@ -67,14 +73,19 @@ npm run prisma:generate
 
 ## Task API
 
-`POST /api/tasks` вимагає `title`, `plannedAt`, `dueAt` і
+`POST /api/tasks` вимагає `title`, `dueAt` і
 `estimatedDurationMinutes`. Дати — ISO 8601 із часовим поясом (`Z` або offset),
 тривалість — додатне ціле число до `2147483647`. `description` необов'язковий.
-Нові задачі мають статус `TODO`.
+`plannedAt` необов'язковий: якщо пропущений, у БД і відповіді буде `null`;
+якщо переданий — перевіряється як дата. Явний `plannedAt: null` у POST відхиляється.
+Нові задачі мають статус `TODO` і пріоритет `MEDIUM`, якщо `priority` не передано.
+POST і PATCH приймають `priority`: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`;
+інші значення та `null` відхиляються. Всі відповіді із задачею містять `priority`.
 
 ```json
 {
   "title": "Підготувати пропозицію",
+  "priority": "HIGH",
   "plannedAt": "2026-10-22T09:00:00+03:00",
   "dueAt": "2026-10-23T17:00:00+03:00",
   "estimatedDurationMinutes": 45
@@ -93,7 +104,7 @@ npm run prisma:generate
 | `DELETE /api/tasks/:id` | Встановлення `deletedAt`, відповідь `204` |
 | `GET /api/tasks/:id/history` | Журнал невидаленої задачі, старі події спочатку |
 
-PATCH приймає `title`, `description`, `status`, `plannedAt`, `dueAt`,
+PATCH приймає `title`, `description`, `status`, `priority`, `plannedAt`, `dueAt`,
 `estimatedDurationMinutes`, `cancellationNote`, `archived`. Невідомі поля та
 порожній PATCH відхиляються. `description`, `plannedAt` і `dueAt` можна очистити
 через `null`; при створенні задачі дати не можуть бути `null`.
@@ -109,7 +120,7 @@ PATCH приймає `title`, `description`, `status`, `plannedAt`, `dueAt`,
 який є `true` лише для `DONE`. Старий PATCH `{ "isCompleted": true }` переводить
 у `DONE`, а `false` — у `TODO`. Одночасно передавати `status` і `isCompleted`
 не можна. У БД поля `isCompleted` більше немає. Старий frontend має додати
-обов'язкові поля планування до POST; frontend у цьому етапі не змінюється.
+обов'язкові `dueAt` та `estimatedDurationMinutes` до POST; frontend у цьому етапі не змінюється.
 
 Архівування: `PATCH { "archived": true }`; відновлення з архіву:
 `PATCH { "archived": false }`. Це не змінює статус чи планування. Видалення
@@ -117,12 +128,28 @@ PATCH приймає `title`, `description`, `status`, `plannedAt`, `dueAt`,
 повертають `404`. Відновлення видалених задач через API немає.
 
 Події: `CREATED`, `EDITED`, `STATUS_CHANGED`, `ARCHIVED`, `UNARCHIVED`, `DELETED`.
+Зміна пріоритету записується як `EDITED` із `metadata.before.priority` та
+`metadata.after.priority` у тій самій транзакції, що й оновлення задачі.
 PATCH, що змінює кілька незалежних аспектів задачі, створює відповідні події
 в одній транзакції; повторне встановлення тих самих значень не створює подій.
 Записи задачі й журналу атомарні. Транзакції мають ізоляцію `Serializable`;
 конфлікти повторюються до трьох спроб, після чого API повертає `409`.
 Помилки валідації повертають `400` з `error.message` та `error.details`,
 невалідний UUID — `400`, відсутня чи видалена задача — `404`.
+
+## Логування HTTP-запитів
+
+Middleware перед CORS, JSON parser і маршрутами генерує новий UUID для кожного
+запиту та повертає його в `X-Request-Id` (також доступному браузеру через CORS).
+Переданий клієнтом ID не використовується. Після завершення відповіді `console.log`
+отримує один JSON-запис: `requestId`, `method`, `path` без query string,
+`statusCode`, `durationMs` у мілісекундах.
+Error handler окремо пише в `console.error` JSON із тим самим `requestId` та
+безпечним `error.type`: `api_error`, `validation_error`, `invalid_json`,
+`body_too_large` або `internal_error`. Тіла запитів/відповідей, заголовки,
+токени, cookies, URL підключення до БД, повідомлення й stack винятків не логуються.
+Не передавайте секрети в сегментах шляху: `path` входить до журналу.
+Форма JSON-помилок і HTTP-статуси API збережені.
 
 ## Локальні перевірки
 
@@ -136,6 +163,7 @@ npm run test:typecheck
 HTTP-тести використовують підставний транзакційний Prisma-клієнт і локальний
 HTTP-сервер; вони не підключаються до БД й не потребують credentials.
 Перевіряються валідація, всі статуси, сумісність `isCompleted`, планування,
+необов'язковий `plannedAt`, пріоритети та їхній журнал, request ID і безпечні HTTP-логи,
 скасування, редагування, архів, видалення, історія, відкат при помилці журналу
 та повтори конфліктів транзакцій. `test:typecheck` перевіряє також TypeScript тестів.
 

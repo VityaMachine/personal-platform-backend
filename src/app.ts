@@ -2,13 +2,15 @@ import cors from "cors";
 import express from "express";
 
 import { errorHandler } from "./middleware/error-handler";
+import { requestLogger } from "./middleware/request-logger";
 import { tasksRouter } from "./modules/tasks/tasks.routes";
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
 
 export const app = express();
 
-app.use(cors({ origin: clientOrigin }));
+app.use(requestLogger);
+app.use(cors({ origin: clientOrigin, exposedHeaders: ["X-Request-Id"] }));
 app.use(express.json());
 
 app.get("/api/health", (_request, response) => {

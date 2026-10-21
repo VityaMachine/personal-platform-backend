@@ -35,7 +35,7 @@ export function createTasksService(repository: TasksRepository) {
     get: findTask,
     create(data: CreateTaskInput) {
       return transaction(async (tx) => {
-        const created = await tx.create(data);
+        const created = await tx.create({ ...data, plannedAt: data.plannedAt ?? null });
         await tx.createAction(created.id, "CREATED", { before: null, after: created });
         return created;
       });
@@ -58,7 +58,7 @@ export function createTasksService(repository: TasksRepository) {
         }
         if (archived !== undefined) data.archivedAt = archived ? before.archivedAt ?? new Date() : null;
         const updated = await tx.update(id, data);
-        const editedKeys = ["title", "description", "plannedAt", "dueAt", "estimatedDurationMinutes", "cancellationNote"] as const;
+        const editedKeys = ["title", "description", "priority", "plannedAt", "dueAt", "estimatedDurationMinutes", "cancellationNote"] as const;
         const previous: Record<string, unknown> = {};
         const next: Record<string, unknown> = {};
         for (const key of editedKeys) {

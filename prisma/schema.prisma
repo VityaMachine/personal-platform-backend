@@ -17,6 +17,13 @@ enum TaskStatus {
   CANCELED
 }
 
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
 enum TaskActionType {
   CREATED
   EDITED
@@ -31,6 +38,7 @@ model Task {
   title                    String     @db.VarChar(160)
   description              String?    @db.Text
   status                   TaskStatus @default(TODO)
+  priority                 TaskPriority @default(MEDIUM)
   plannedAt                DateTime?  @db.Timestamptz(3)
   dueAt                    DateTime?  @db.Timestamptz(3)
   estimatedDurationMinutes Int
