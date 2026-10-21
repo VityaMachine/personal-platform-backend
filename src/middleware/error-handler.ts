@@ -1,4 +1,6 @@
 import type { ErrorRequestHandler } from "express";
+import { ZodError } from "zod";
+import { ApiError } from "../lib/api-error";
 
 export const errorHandler: ErrorRequestHandler = (
   error,
@@ -8,6 +10,21 @@ export const errorHandler: ErrorRequestHandler = (
 ) => {
   if (response.headersSent) {
     next(error);
+    return;
+  }
+
+  if (error instanceof ApiError) {
+    response.status(error.status).json({ error: { message: error.message } });
+    return;
+  }
+
+  if (error instanceof ZodError) {
+    response.status(400).json({
+      error: {
+        message: "Invalid task data.",
+        details: error.issues.map(({ path, message }) => ({ path, message })),
+      },
+    });
     return;
   }
 

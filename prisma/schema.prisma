@@ -8,11 +8,49 @@ datasource db {
   provider = "postgresql"
 }
 
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  PAUSED
+  POSTPONED
+  DONE
+  CANCELED
+}
+
+enum TaskActionType {
+  CREATED
+  EDITED
+  STATUS_CHANGED
+  ARCHIVED
+  UNARCHIVED
+  DELETED
+}
+
 model Task {
-  id          String   @id @default(uuid()) @db.Uuid
-  title       String   @db.VarChar(160)
-  description String?  @db.Text
-  isCompleted Boolean  @default(false)
-  createdAt   DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+  id                       String     @id @default(uuid()) @db.Uuid
+  title                    String     @db.VarChar(160)
+  description              String?    @db.Text
+  status                   TaskStatus @default(TODO)
+  plannedAt                DateTime?  @db.Timestamptz(3)
+  dueAt                    DateTime?  @db.Timestamptz(3)
+  estimatedDurationMinutes Int
+  cancellationNote         String?    @db.Text
+  archivedAt               DateTime?  @db.Timestamptz(3)
+  deletedAt                DateTime?  @db.Timestamptz(3)
+  createdAt                DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime   @updatedAt @db.Timestamptz(3)
+  actions                  TaskAction[]
+
+  @@index([deletedAt, archivedAt, createdAt])
+}
+
+model TaskAction {
+  id        String         @id @default(uuid()) @db.Uuid
+  taskId    String         @db.Uuid
+  type      TaskActionType
+  timestamp DateTime       @default(now()) @db.Timestamptz(3)
+  metadata  Json
+  task      Task           @relation(fields: [taskId], references: [id], onDelete: Restrict)
+
+  @@index([taskId, timestamp])
 }

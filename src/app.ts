@@ -2,7 +2,7 @@ import cors from "cors";
 import express from "express";
 
 import { errorHandler } from "./middleware/error-handler";
-import { tasksRouter } from "./routes/tasks";
+import { tasksRouter } from "./modules/tasks/tasks.routes";
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
 
