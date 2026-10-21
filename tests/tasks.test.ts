@@ -8,7 +8,8 @@ import express from "express";
 import { app } from "../src/app";
 import { Prisma, type PrismaClient, type Task, type TaskAction } from "../src/generated/prisma/client";
 import { errorHandler } from "../src/middleware/error-handler";
-import { requestLogger } from "../src/middleware/request-logger";
+import { createRequestLogger } from "../src/middleware/request-logger";
+import { createLogger } from "../src/lib/logger";
 import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
 
 const input = {
@@ -78,7 +79,8 @@ async function fixture(t: TestContext) {
     },
   } as unknown as PrismaClient;
   const app = express();
-  app.use(requestLogger);
+  const logs: string[] = [];
+  app.use(createRequestLogger(createLogger("production", { write(line) { logs.push(line); } })));
   app.use(express.json());
   app.use("/api/tasks", createTasksRouter(() => client));
   app.use(errorHandler);
@@ -94,7 +96,7 @@ async function fixture(t: TestContext) {
     return { status: response.status, body: response.status === 204 ? null : await response.json() };
   }
   return {
-    request, state: () => state, failEvents: () => { failEvent = true; },
+    request, logs, state: () => state, failEvents: () => { failEvent = true; },
     conflicts: (count: number) => { conflicts = count; }, attempts: () => attempts,
     async create() {
       const result = await request("POST", "", input);
@@ -249,7 +251,7 @@ test("event failures roll back task creation, edits, status, archive, restoratio
   await f.request("PATCH", `/${archived.id}`, { archived: true });
   const before = structuredClone(f.state());
   f.failEvents();
-  const log = t.mock.method(console, "error", () => {});
+  const logsBeforeFailure = f.logs.length;
   assert.equal((await f.request("POST", "", input)).status, 500);
   for (const [id, data] of [
     [task.id, { title: "Changed" }], [task.id, { status: "DONE" }], [task.id, { priority: "HIGH" }],
@@ -257,7 +259,9 @@ test("event failures roll back task creation, edits, status, archive, restoratio
   ] as const) assert.equal((await f.request("PATCH", `/${id}`, data)).status, 500);
   assert.equal((await f.request("DELETE", `/${task.id}`)).status, 500);
   assert.deepEqual(f.state(), before);
-  assert.equal(log.mock.callCount(), 7);
+  const failures = f.logs.slice(logsBeforeFailure).map((line) => JSON.parse(line));
+  assert.equal(failures.length, 7);
+  assert.ok(failures.every((entry) => entry.statusCode === 500 && entry.error.type === "internal_error"));
 });
 
 test("deleting an active task preserves its status and hides it from both lists", async (t) => {

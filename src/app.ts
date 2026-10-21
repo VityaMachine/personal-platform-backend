@@ -1,5 +1,5 @@
 import cors from "cors";
-import express from "express";
+import express, { type RequestHandler } from "express";
 
 import { errorHandler } from "./middleware/error-handler";
 import { requestLogger } from "./middleware/request-logger";
@@ -7,16 +7,21 @@ import { tasksRouter } from "./modules/tasks/tasks.routes";
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
 
-export const app = express();
+export function createApp(httpLogger: RequestHandler = requestLogger) {
+  const app = express();
 
-app.use(requestLogger);
-app.use(cors({ origin: clientOrigin, exposedHeaders: ["X-Request-Id"] }));
-app.use(express.json());
+  app.use(httpLogger);
+  app.use(cors({ origin: clientOrigin, exposedHeaders: ["X-Request-Id"] }));
+  app.use(express.json());
 
-app.get("/api/health", (_request, response) => {
-  response.json({ status: "ok" });
-});
+  app.get("/api/health", (_request, response) => {
+    response.json({ status: "ok" });
+  });
 
-app.use("/api/tasks", tasksRouter);
+  app.use("/api/tasks", tasksRouter);
 
-app.use(errorHandler);
+  app.use(errorHandler);
+  return app;
+}
+
+export const app = createApp();

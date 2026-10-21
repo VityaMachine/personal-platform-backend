@@ -14,7 +14,8 @@ export const errorHandler: ErrorRequestHandler = (
     : error?.type === "entity.parse.failed" ? "invalid_json"
     : error?.type === "entity.too.large" ? "body_too_large"
     : "internal_error";
-  console.error(JSON.stringify({ requestId: response.locals.requestId, error: { type: errorType } }));
+  // pino-http emits the single completion record with this safe category.
+  response.locals.errorType = errorType;
 
   if (response.headersSent) {
     next(error);

@@ -141,15 +141,24 @@ PATCH, що змінює кілька незалежних аспектів за
 
 Middleware перед CORS, JSON parser і маршрутами генерує новий UUID для кожного
 запиту та повертає його в `X-Request-Id` (також доступному браузеру через CORS).
-Переданий клієнтом ID не використовується. Після завершення відповіді `console.log`
-отримує один JSON-запис: `requestId`, `method`, `path` без query string,
-`statusCode`, `durationMs` у мілісекундах.
-Error handler окремо пише в `console.error` JSON із тим самим `requestId` та
-безпечним `error.type`: `api_error`, `validation_error`, `invalid_json`,
-`body_too_large` або `internal_error`. Тіла запитів/відповідей, заголовки,
+Переданий клієнтом ID не використовується. `pino` і `pino-http` пишуть рівно один
+підсумковий запис на запит: `requestId` (збігається з `X-Request-Id`), `method`,
+`path` без query string, `statusCode`, `durationMs` у мілісекундах і `remoteAddress`
+із сокета (заголовки proxy не використовуються). Рівні: `info` для статусів до 400,
+`warn` для 4xx, `error` для 5xx і транспортних помилок.
+Error handler додає до того самого запису безпечний `error.type`: `api_error`,
+`validation_error`, `invalid_json`, `body_too_large` або `internal_error`.
+Окремого запису помилки немає. Тіла запитів/відповідей, заголовки,
 токени, cookies, URL підключення до БД, повідомлення й stack винятків не логуються.
 Не передавайте секрети в сегментах шляху: `path` входить до журналу.
 Форма JSON-помилок і HTTP-статуси API збережені.
+
+Без `NODE_ENV` або з `NODE_ENV=development` використовується `pino-pretty`:
+кольорові timestamp із локальним часовим поясом, рівень і PID, короткий підсумок
+`GET /api/health 200 12ms requestId=<UUID>`; нижче — деталі запиту.
+`pino-pretty` є dev-залежністю. З `NODE_ENV=production` HTTP-логи — структурований
+JSON у stdout, без завантаження `pino-pretty`; інші значення `NODE_ENV` також дають JSON.
+Для production задавайте `NODE_ENV=production`, зокрема при `npm ci --omit=dev`.
 
 ## Локальні перевірки
 

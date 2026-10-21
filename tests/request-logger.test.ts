@@ -1,34 +1,54 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import express from "express";
 
-import { app } from "../src/app";
+import { createApp } from "../src/app";
+import { createLogger } from "../src/lib/logger";
+import { ApiError } from "../src/lib/api-error";
 import { errorHandler } from "../src/middleware/error-handler";
-import { requestLogger } from "../src/middleware/request-logger";
+import { createRequestLogger } from "../src/middleware/request-logger";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-test("app assigns unique request IDs and logs each completed request without sensitive input", async (t) => {
-  const logs = t.mock.method(console, "log", () => {});
-  const errors = t.mock.method(console, "error", () => {});
+function capture() {
+  const lines: string[] = [];
+  const middleware = createRequestLogger(createLogger("production", {
+    write(line) { lines.push(line); },
+  }));
+  return { middleware, lines, entries: () => lines.map((line) => JSON.parse(line)) };
+}
+
+async function listen(t: TestContext, app: express.Express) {
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+test("app logs each request once with its response UUID, status and safe metadata", async (t) => {
+  const output = capture();
+  const base = await listen(t, createApp(output.middleware));
   const ids = new Set<string>();
   const cases = [
-    { path: "/api/health?token=query-secret", method: "GET", status: 200 },
-    { path: "/api/tasks/invalid-id", method: "GET", status: 400 },
-    { path: "/api/tasks", method: "POST", body: '{"secret":"body-secret",', status: 400 },
+    { path: "/api/health?token=query-secret&password=password-secret", method: "GET", status: 200 },
+    { path: "/api/tasks/invalid-id", method: "GET", status: 400, category: "api_error" },
+    { path: "/api/tasks", method: "POST", body: '{"password":"body-secret",', status: 400, category: "invalid_json" },
+    { path: "/api/tasks", method: "POST", body: '{}', status: 400, category: "validation_error" },
+    { path: "/api/tasks", method: "POST", body: JSON.stringify({ password: "x".repeat(110_000) }), status: 413, category: "body_too_large" },
     { path: "/missing", method: "GET", status: 404 },
     { path: "/api/tasks", method: "OPTIONS", status: 204 },
   ];
   for (const item of cases) {
     const response = await fetch(base + item.path, {
       method: item.method,
-      headers: { "Content-Type": "application/json", Authorization: "Bearer token-secret", Cookie: "session=cookie-secret", "X-Request-Id": "untrusted-id" },
+      headers: {
+        "Content-Type": "application/json", Authorization: "Bearer token-secret",
+        Cookie: "session=cookie-secret", "X-Request-Id": "untrusted-id",
+        Origin: "http://localhost:3000",
+      },
       body: item.body,
     });
     await response.text();
@@ -37,47 +57,82 @@ test("app assigns unique request IDs and logs each completed request without sen
     assert.match(requestId, uuid);
     assert.ok(!ids.has(requestId));
     ids.add(requestId);
-    const matching = logs.mock.calls.map((call) => JSON.parse(String(call.arguments[0])))
-      .filter((entry) => entry.requestId === requestId);
+    assert.ok(response.headers.get("Access-Control-Expose-Headers")?.includes("X-Request-Id"));
+    const matching = output.entries().filter((entry) => entry.requestId === requestId);
     assert.equal(matching.length, 1);
-    assert.deepEqual(Object.keys(matching[0]).sort(), ["durationMs", "method", "path", "requestId", "statusCode"]);
-    assert.equal(matching[0].method, item.method);
-    assert.equal(matching[0].path, item.path.split("?")[0]);
-    assert.equal(matching[0].statusCode, item.status);
-    assert.equal(typeof matching[0].durationMs, "number");
-    assert.ok(matching[0].durationMs >= 0);
+    const entry = matching[0];
+    assert.equal(entry.method, item.method);
+    assert.equal(entry.path, item.path.split("?")[0]);
+    assert.equal(entry.statusCode, item.status);
+    assert.equal(entry.level, item.status >= 400 ? 40 : 30);
+    assert.equal(typeof entry.durationMs, "number");
+    assert.ok(entry.durationMs >= 0);
+    assert.equal(entry.remoteAddress, "127.0.0.1");
+    assert.equal(entry.error?.type, item.category);
+    assert.equal(typeof entry.time, "number");
+    assert.equal(entry.pid, process.pid);
+    assert.ok(entry.msg.includes(requestId));
+    assert.deepEqual(Object.keys(entry).sort(), [
+      "durationMs", "hostname", "level", "method", "msg", "path", "pid", "remoteAddress", "requestId", "statusCode", "time",
+      ...(item.category ? ["error"] : []),
+    ].sort());
   }
-  assert.equal(logs.mock.callCount(), cases.length);
-  assert.equal(errors.mock.callCount(), 2);
-  for (const call of errors.mock.calls) {
-    const entry = JSON.parse(String(call.arguments[0]));
-    assert.ok(ids.has(entry.requestId));
-    assert.ok(["api_error", "invalid_json"].includes(entry.error.type));
-  }
-  const output = JSON.stringify([...logs.mock.calls, ...errors.mock.calls]);
-  for (const secret of ["query-secret", "body-secret", "token-secret", "cookie-secret", "untrusted-id"]) {
-    assert.ok(!output.includes(secret));
+  assert.equal(output.lines.length, cases.length);
+  for (const secret of ["query-secret", "password-secret", "body-secret", "token-secret", "cookie-secret", "untrusted-id", "Authorization", "Cookie"]) {
+    assert.ok(!output.lines.join("").includes(secret), secret);
   }
 });
 
-test("unexpected errors log only a safe category with the matching request ID", async (t) => {
-  const logs = t.mock.method(console, "log", () => {});
-  const errors = t.mock.method(console, "error", () => {});
-  const localApp = express();
-  localApp.use(requestLogger);
-  localApp.get("/failure", () => { throw new Error("DATABASE_URL=postgres://secret-password"); });
-  localApp.use(errorHandler);
-  const server = localApp.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
-  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/failure`);
-  assert.equal(response.status, 500);
-  assert.deepEqual(await response.json(), { error: { message: "Internal server error." } });
-  const requestId = response.headers.get("X-Request-Id");
-  assert.equal(errors.mock.callCount(), 1);
-  assert.deepEqual(JSON.parse(String(errors.mock.calls[0].arguments[0])), {
-    requestId, error: { type: "internal_error" },
+test("500 and API errors omit exception details and response bodies and emit one record", async (t) => {
+  const output = capture();
+  const app = express();
+  app.use(output.middleware);
+  app.get("/failure", () => { throw new Error("DATABASE_URL=postgres://secret-password token=exception-secret"); });
+  app.get("/api-error", () => { throw new ApiError(409, "response-secret"); });
+  app.get("/success", (_req, res) => {
+    res.setHeader("Set-Cookie", "session=response-cookie-secret");
+    res.json({ password: "response-body-secret" });
   });
-  assert.equal(logs.mock.callCount(), 1);
-  assert.equal(JSON.parse(String(logs.mock.calls[0].arguments[0])).requestId, requestId);
+  app.use(errorHandler);
+  const base = await listen(t, app);
+  for (const [path, status, category] of [
+    ["/failure", 500, "internal_error"], ["/api-error", 409, "api_error"], ["/success", 200, undefined],
+  ] as const) {
+    const response = await fetch(base + path);
+    assert.equal(response.status, status);
+    const body = await response.json();
+    if (status === 500) assert.deepEqual(body, { error: { message: "Internal server error." } });
+    const entries = output.entries().filter((entry) => entry.requestId === response.headers.get("X-Request-Id"));
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].statusCode, status);
+    assert.equal(entries[0].level, status >= 500 ? 50 : status >= 400 ? 40 : 30);
+    assert.equal(entries[0].error?.type, category);
+  }
+  assert.equal(output.lines.length, 3);
+  for (const secret of ["DATABASE_URL", "secret-password", "exception-secret", "response-secret", "response-cookie-secret", "response-body-secret", "stack"]) {
+    assert.ok(!output.lines.join("").includes(secret), secret);
+  }
+});
+
+test("development prints colored timestamp, PID, HTTP summary and details; production prints JSON", () => {
+  for (const environment of ["development", "production"]) {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "-e", `
+      const { createLogger } = require('./src/lib/logger.ts');
+      const logger = createLogger(${JSON.stringify(environment)});
+      logger.info({requestId:'sample-id',method:'GET',path:'/api/health',statusCode:200,durationMs:12,remoteAddress:'127.0.0.1'}, 'completed');
+    `], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, result.stderr);
+    if (environment === "production") {
+      const entry = JSON.parse(result.stdout);
+      assert.equal(entry.requestId, "sample-id");
+      assert.equal(entry.statusCode, 200);
+      assert.ok(!result.stdout.includes("\u001b["));
+    } else {
+      assert.ok(result.stdout.includes("\u001b["));
+      const plain = result.stdout.replace(/\x1b\[[0-9;]*m/g, "");
+      assert.match(plain, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [+-]\d{4}/);
+      assert.match(plain, /INFO\s+\(\d+\): GET \/api\/health 200 12ms requestId=sample-id/);
+      assert.match(plain, /\n\s+remoteAddress: "127\.0\.0\.1"/);
+    }
+  }
 });
