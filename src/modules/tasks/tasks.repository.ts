@@ -1,19 +1,28 @@
 import { Prisma, type PrismaClient, type TaskActionType } from "../../generated/prisma/client";
 import { getPrisma } from "../../lib/prisma";
 
+const taskInclude = {
+  subtasks: {
+    where: { deletedAt: null },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  },
+} satisfies Prisma.TaskInclude;
+
+export type TaskWithSubtasks = Prisma.TaskGetPayload<{ include: typeof taskInclude }>;
+
 function createTaskQueries(db: Prisma.TransactionClient) {
   return {
     findMany(where: Prisma.TaskWhereInput) {
-      return db.task.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
+      return db.task.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }], include: taskInclude });
     },
     findFirst(where: Prisma.TaskWhereInput) {
-      return db.task.findFirst({ where });
+      return db.task.findFirst({ where, include: taskInclude });
     },
     create(data: Prisma.TaskCreateInput) {
       return db.task.create({ data });
     },
     update(id: string, data: Prisma.TaskUpdateInput) {
-      return db.task.update({ where: { id }, data });
+      return db.task.update({ where: { id }, data, include: taskInclude });
     },
     createAction(taskId: string, type: TaskActionType, metadata: unknown) {
       const json: Prisma.InputJsonValue = JSON.parse(JSON.stringify(metadata));

@@ -2,6 +2,7 @@ import type { Task } from "../../generated/prisma/client";
 import { ApiError } from "../../lib/api-error";
 import {
   TasksTransactionConflictError,
+  type TaskWithSubtasks,
   type TasksRepository,
   type TasksTransactionRepository,
 } from "./tasks.repository";
@@ -39,7 +40,7 @@ export function createTasksService(repository: TasksRepository) {
       return transaction(async (tx) => {
         const created = await tx.create({ ...data, plannedAt: data.plannedAt ?? null });
         await tx.createAction(created.id, "CREATED", { before: null, after: created });
-        return created;
+        return { ...created, subtasks: [] } satisfies TaskWithSubtasks;
       });
     },
     history(id: string) {
@@ -52,7 +53,7 @@ export function createTasksService(repository: TasksRepository) {
       const { archived, isCompleted, ...fields } = input;
       return transaction(async (tx) => {
         const before = await findTask(id, tx);
-        if (fields.estimatedDurationMinutes !== undefined && (await tx.findSubtasks(id)).length) {
+        if (fields.estimatedDurationMinutes !== undefined && before.subtasks.length) {
           throw new ApiError(409, "Task duration is calculated from its subtasks.");
         }
         const data: Partial<Task> = { ...fields };

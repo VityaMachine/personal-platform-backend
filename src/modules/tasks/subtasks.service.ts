@@ -22,16 +22,19 @@ export function createSubtasksService({ findTask, transaction }: Dependencies) {
     return subtask;
   }
 
-  async function synchronize(tx: Transaction, parent: Task, subtaskId: string, addedOrReopened = false) {
+  async function synchronize(tx: Transaction, parent: Task, subtaskId: string) {
     const subtasks = await tx.findSubtasks(parent.id);
     // Keep the last duration and status after deleting the final subtask.
     if (!subtasks.length) return;
     const duration = subtasks.reduce((sum, subtask) => sum + subtask.estimatedDurationMinutes, 0);
     if (duration > 2_147_483_647) throw new ApiError(400, "Total subtask duration exceeds the supported limit.");
-    const status = subtasks.some((subtask) => subtask.status === "IN_PROGRESS") ? "IN_PROGRESS"
-      : subtasks.every((subtask) => subtask.status === "DONE") ? "DONE"
-      : parent.status === "IN_PROGRESS" && subtasks.every((subtask) => subtask.status === "TODO") ? "TODO"
-      : parent.status === "DONE" && addedOrReopened ? "TODO" : parent.status;
+    let status = parent.status;
+    if (subtasks.every((subtask) => subtask.status === "TODO")) status = "TODO";
+    else if (subtasks.every((subtask) => subtask.status === "DONE")) status = "DONE";
+    else if (subtasks.some((subtask) => subtask.status === "IN_PROGRESS")) status = "IN_PROGRESS";
+    else if (subtasks.some((subtask) => subtask.status === "DONE") &&
+      subtasks.some((subtask) => subtask.status === "TODO") &&
+      parent.status !== "PAUSED" && parent.status !== "POSTPONED") status = "IN_PROGRESS";
     if (duration === parent.estimatedDurationMinutes && status === parent.status) return;
     const updated = await tx.update(parent.id, { estimatedDurationMinutes: duration, status });
     if (duration !== parent.estimatedDurationMinutes) {
@@ -62,7 +65,7 @@ export function createSubtasksService({ findTask, transaction }: Dependencies) {
         const parent = await writableParent(taskId, tx);
         const created = await tx.createSubtask(taskId, input);
         await tx.createAction(taskId, "SUBTASK_CREATED", { subtaskId: created.id, before: null, after: created });
-        await synchronize(tx, parent, created.id, true);
+        await synchronize(tx, parent, created.id);
         return created;
       });
     },
@@ -89,9 +92,7 @@ export function createSubtasksService({ findTask, transaction }: Dependencies) {
             after: { status: updated.status, cancellationNote: updated.cancellationNote },
           });
         }
-        const reopened = (before.status === "DONE" || before.status === "CANCELED") &&
-          updated.status !== before.status && updated.status !== "DONE" && updated.status !== "CANCELED";
-        await synchronize(tx, parent, id, reopened);
+        await synchronize(tx, parent, id);
         return updated;
       });
     },

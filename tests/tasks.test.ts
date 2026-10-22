@@ -578,7 +578,7 @@ test("subtask changes synchronize active and completed statuses and preserve oth
   await patch(second.id, "DONE");
   assert.equal(await status(), "DONE");
   await patch(first.id, "TODO");
-  assert.equal(await status(), "TODO");
+  assert.equal(await status(), "IN_PROGRESS");
   for (const next of ["PAUSED", "POSTPONED", "CANCELED"]) {
     await f.request("PATCH", `/${parent.id}`, { status: next, ...(next === "CANCELED" ? { cancellationNote: "Parent reason" } : {}) });
     await patch(first.id, next);
@@ -594,6 +594,101 @@ test("subtask changes synchronize active and completed statuses and preserve oth
     before: { status: "IN_PROGRESS", cancellationNote: "Parent reason" },
     after: { status: "DONE", cancellationNote: "Parent reason" },
   });
+});
+
+test("subtask creation, status changes and soft deletion follow ordered parent status rules", async (t) => {
+  const parentStatuses = ["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED"] as const;
+  type Status = Task["status"];
+  const preserved = [...parentStatuses];
+  const mixed: Status[] = ["IN_PROGRESS", "IN_PROGRESS", "PAUSED", "POSTPONED", "IN_PROGRESS", "IN_PROGRESS"];
+  const cases: { children: Status[]; expected: readonly Status[] }[] = [
+    { children: ["TODO", "TODO"], expected: parentStatuses.map(() => "TODO") },
+    { children: ["DONE", "DONE"], expected: parentStatuses.map(() => "DONE") },
+    { children: ["TODO", "DONE", "IN_PROGRESS"], expected: parentStatuses.map(() => "IN_PROGRESS") },
+    { children: ["PAUSED", "POSTPONED", "CANCELED", "IN_PROGRESS"], expected: parentStatuses.map(() => "IN_PROGRESS") },
+    { children: ["DONE", "TODO"], expected: mixed },
+    { children: ["DONE", "TODO", "PAUSED"], expected: mixed },
+    { children: ["DONE", "TODO", "POSTPONED", "CANCELED"], expected: mixed },
+    { children: ["TODO", "PAUSED"], expected: preserved },
+    { children: ["DONE", "POSTPONED"], expected: preserved },
+    { children: ["DONE", "CANCELED"], expected: preserved },
+    { children: ["TODO", "CANCELED"], expected: preserved },
+    { children: ["PAUSED", "POSTPONED", "CANCELED"], expected: preserved },
+  ];
+  const statusInput = (status: Status) => ({ status, ...(status === "CANCELED" ? { cancellationNote: "Reason" } : {}) });
+  for (const operation of ["create", "status", "delete"] as const) {
+    for (const { children, expected } of cases) {
+      for (const [index, parentStatus] of parentStatuses.entries()) {
+        await t.test(`${operation}: ${parentStatus} with ${children.join(" + ")}`, async (t) => {
+          const f = await fixture(t);
+          const parent = await f.create();
+          for (const status of ["TODO", "DONE", "IN_PROGRESS"] as const) {
+            const deleted = await f.createSubtask(parent.id, { ...statusInput(status), estimatedDurationMinutes: 100 });
+            assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${deleted.id}`)).status, 204);
+          }
+          const targetStatus = children.at(-1)!;
+          const existingStatuses: Status[] = operation === "create" ? children.slice(0, -1)
+            : operation === "status" ? [...children.slice(0, -1), targetStatus === "PAUSED" ? "POSTPONED" : "PAUSED"]
+            : [...children, "IN_PROGRESS"];
+          let targetId = "";
+          for (const status of existingStatuses) {
+            targetId = (await f.createSubtask(parent.id, { ...statusInput(status), estimatedDurationMinutes: 7 })).id;
+          }
+          assert.equal((await f.request("PATCH", `/${parent.id}`, statusInput(parentStatus))).status, 200);
+          const actionCount = f.state().actions.length;
+          if (operation === "create") {
+            targetId = (await f.createSubtask(parent.id, { ...statusInput(targetStatus), estimatedDurationMinutes: 7 })).id;
+          } else {
+            assert.equal((await f.request(operation === "status" ? "PATCH" : "DELETE",
+              `/${parent.id}/subtasks/${targetId}`, operation === "status" ? statusInput(targetStatus) : undefined)).status,
+            operation === "status" ? 200 : 204);
+          }
+          const result = (await f.request("GET", `/${parent.id}`)).body;
+          assert.equal(result.status, expected[index]);
+          assert.equal(result.isCompleted, expected[index] === "DONE");
+          assert.equal(result.estimatedDurationMinutes, children.length * 7);
+          assert.equal(result.subtasks.length, children.length);
+          assert.deepEqual(result.subtasks.map((child: Subtask) => child.status).sort(), [...children].sort());
+          const actions = f.state().actions.slice(actionCount);
+          assert.deepEqual(actions.map((action) => action.type), [
+            ...(operation === "status" && targetStatus === "CANCELED" ? ["SUBTASK_EDITED"] : []),
+            operation === "create" ? "SUBTASK_CREATED" : operation === "status" ? "SUBTASK_STATUS_CHANGED" : "SUBTASK_DELETED",
+            ...(operation === "status" ? [] : ["EDITED"]),
+            ...(expected[index] === parentStatus ? [] : ["STATUS_CHANGED"]),
+          ]);
+          if (expected[index] !== parentStatus) {
+            assert.deepEqual(actions.at(-1)!.metadata, {
+              subtaskId: targetId,
+              before: { status: parentStatus, cancellationNote: parentStatus === "CANCELED" ? "Reason" : null },
+              after: { status: expected[index], cancellationNote: parentStatus === "CANCELED" ? "Reason" : null },
+            });
+          }
+        });
+      }
+    }
+  }
+});
+
+test("deleting the last active subtask preserves every parent status and the last duration", async (t) => {
+  for (const status of ["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED"] as const) {
+    await t.test(status, async (t) => {
+      const f = await fixture(t);
+      const parent = await f.create();
+      const deleted = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 100 });
+      const last = await f.createSubtask(parent.id, { estimatedDurationMinutes: 7 });
+      assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${deleted.id}`)).status, 204);
+      assert.equal((await f.request("PATCH", `/${parent.id}`, {
+        status, ...(status === "CANCELED" ? { cancellationNote: "Reason" } : {}),
+      })).status, 200);
+      const actionCount = f.state().actions.length;
+      assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${last.id}`)).status, 204);
+      const result = (await f.request("GET", `/${parent.id}`)).body;
+      assert.equal(result.status, status);
+      assert.equal(result.estimatedDurationMinutes, 7);
+      assert.deepEqual(result.subtasks, []);
+      assert.deepEqual(f.state().actions.slice(actionCount).map((action) => action.type), ["SUBTASK_DELETED"]);
+    });
+  }
 });
 
 test("soft deletion recalculates parent status and duration using only live subtasks", async (t) => {
@@ -710,15 +805,15 @@ test("manual parent statuses never cascade; adding or reopening under DONE follo
   await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "DONE" });
   await f.request("PATCH", `/${parent.id}/subtasks/${added.id}`, { status: "DONE" });
   const todo = await f.createSubtask(parent.id);
-  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "TODO");
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "IN_PROGRESS");
   await f.request("PATCH", `/${parent.id}/subtasks/${todo.id}`, { status: "DONE" });
   await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "CANCELED", cancellationNote: "Canceled without reopening" });
   assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "DONE");
   await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "TODO" });
-  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "TODO");
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "IN_PROGRESS");
   await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "DONE" });
   await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "PAUSED" });
-  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "TODO");
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "DONE");
   await f.request("PATCH", `/${parent.id}`, { isCompleted: true });
   assert.equal(f.state().subtasks.find((subtask) => subtask.id === child.id)!.status, "PAUSED");
   await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { title: "Edit only" });
