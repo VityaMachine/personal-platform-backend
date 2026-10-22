@@ -30,6 +30,7 @@ export function createSubtasksService({ findTask, transaction }: Dependencies) {
     if (duration > 2_147_483_647) throw new ApiError(400, "Total subtask duration exceeds the supported limit.");
     const status = subtasks.some((subtask) => subtask.status === "IN_PROGRESS") ? "IN_PROGRESS"
       : subtasks.every((subtask) => subtask.status === "DONE") ? "DONE"
+      : parent.status === "IN_PROGRESS" && subtasks.every((subtask) => subtask.status === "TODO") ? "TODO"
       : parent.status === "DONE" && addedOrReopened ? "TODO" : parent.status;
     if (duration === parent.estimatedDurationMinutes && status === parent.status) return;
     const updated = await tx.update(parent.id, { estimatedDurationMinutes: duration, status });

@@ -26,14 +26,30 @@ async function fixture(t: TestContext) {
   let writesBeforeFailure: number | undefined;
   let conflicts = 0;
   let attempts = 0;
+  const reads = { tasks: 0, subtasks: 0 };
+  function taskResult(db: typeof state, task: Task, include?: Prisma.TaskInclude) {
+    if (!include) return structuredClone(task);
+    assert.deepEqual(include, {
+      subtasks: { where: { deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
+    });
+    return structuredClone({
+      ...task,
+      subtasks: db.subtasks.filter((child) => child.taskId === task.id && child.deletedAt === null)
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id)),
+    });
+  }
   const delegates = (db: typeof state) => ({
     task: {
-      async findFirst({ where }: { where: { id: string; deletedAt: null } }) {
-        return structuredClone(db.tasks.find((task) => task.id === where.id && task.deletedAt === where.deletedAt) ?? null);
+      async findFirst({ where, include }: { where: { id: string; deletedAt: null }; include?: Prisma.TaskInclude }) {
+        reads.tasks++;
+        const task = db.tasks.find((task) => task.id === where.id && task.deletedAt === where.deletedAt);
+        return task ? taskResult(db, task, include) : null;
       },
-      async findMany({ where }: { where: { deletedAt: null; archivedAt: null | { not: null } } }) {
-        return structuredClone(db.tasks.filter((task) => task.deletedAt === where.deletedAt &&
-          (where.archivedAt === null ? task.archivedAt === null : task.archivedAt !== null)));
+      async findMany({ where, include }: { where: { deletedAt: null; archivedAt: null | { not: null } }; include?: Prisma.TaskInclude }) {
+        reads.tasks++;
+        return db.tasks.filter((task) => task.deletedAt === where.deletedAt &&
+          (where.archivedAt === null ? task.archivedAt === null : task.archivedAt !== null))
+          .map((task) => taskResult(db, task, include));
       },
       async create({ data }: { data: Partial<Task> }) {
         const task: Task = {
@@ -45,10 +61,10 @@ async function fixture(t: TestContext) {
         db.tasks.push(task);
         return structuredClone(task);
       },
-      async update({ where, data }: { where: { id: string }; data: Partial<Task> }) {
+      async update({ where, data, include }: { where: { id: string }; data: Partial<Task>; include?: Prisma.TaskInclude }) {
         const task = db.tasks.find((task) => task.id === where.id)!;
         Object.assign(task, data, { updatedAt: new Date() });
-        return structuredClone(task);
+        return taskResult(db, task, include);
       },
     },
     taskAction: {
@@ -64,6 +80,7 @@ async function fixture(t: TestContext) {
     },
     subtask: {
       async findMany({ where }: { where: { taskId: string; deletedAt: null } }) {
+        reads.subtasks++;
         return structuredClone(db.subtasks.filter((subtask) => subtask.taskId === where.taskId && subtask.deletedAt === null));
       },
       async findFirst({ where }: { where: { id: string; taskId: string; deletedAt: null } }) {
@@ -117,12 +134,12 @@ async function fixture(t: TestContext) {
     return { status: response.status, body: response.status === 204 ? null : await response.json() };
   }
   return {
-    request, logs, state: () => state, failEvents: (after = 0) => { writesBeforeFailure = after; },
+    request, logs, reads, state: () => state, failEvents: (after = 0) => { writesBeforeFailure = after; },
     conflicts: (count: number) => { conflicts = count; }, attempts: () => attempts,
     async create() {
       const result = await request("POST", "", input);
       assert.equal(result.status, 201);
-      return result.body as Task & { isCompleted: boolean };
+      return result.body as Task & { isCompleted: boolean; subtasks: Subtask[] };
     },
     async createSubtask(taskId: string, data: Record<string, unknown> = {}) {
       const result = await request("POST", `/${taskId}/subtasks`, {
@@ -365,7 +382,60 @@ test("app mounts the module at /api/tasks", async (t) => {
   assert.deepEqual(await health.json(), { status: "ok" });
 });
 
-test("subtask CRUD validates fields, cancellation and UUIDs without changing the task response shape", async (t) => {
+test("Task create, list, detail and update return empty subtasks arrays", async (t) => {
+  const f = await fixture(t);
+  const task = await f.create();
+  assert.deepEqual(task.subtasks, []);
+  assert.deepEqual((await f.request("GET")).body[0].subtasks, []);
+  assert.deepEqual((await f.request("GET", `/${task.id}`)).body.subtasks, []);
+  assert.deepEqual((await f.request("PATCH", `/${task.id}`, { title: "Edited" })).body.subtasks, []);
+});
+
+test("Task responses embed complete active subtask DTOs in stable order without per-task reads", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const empty = await f.create();
+  const other = await f.create();
+  const newest = await f.createSubtask(parent.id, { title: "Newest", status: "CANCELED", cancellationNote: "No longer needed" });
+  const tied = await f.createSubtask(parent.id, { title: "Tied", status: "DONE" });
+  const oldest = await f.createSubtask(parent.id, { title: "Oldest", estimatedDurationMinutes: 7 });
+  const deleted = await f.createSubtask(parent.id, { title: "Deleted" });
+  const otherChild = await f.createSubtask(other.id, { title: "Other task" });
+  // Seed out-of-order timestamps, including a tie, independently of insertion order.
+  for (const child of f.state().subtasks.filter((child) => child.taskId === parent.id)) {
+    child.createdAt = new Date(child.id === newest.id ? "2026-10-22T10:00:00Z" : "2026-10-21T10:00:00Z");
+  }
+  assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${deleted.id}`)).status, 204);
+  const tiedIds = [tied.id, oldest.id].sort();
+  const expected = JSON.parse(JSON.stringify([...tiedIds, newest.id].map((id) => f.state().subtasks.find((child) => child.id === id))));
+  const beforeReads = { ...f.reads };
+  const list = await f.request("GET");
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.body.find((task: Task) => task.id === parent.id).subtasks, expected);
+  assert.deepEqual(list.body.find((task: Task) => task.id === empty.id).subtasks, []);
+  assert.deepEqual(list.body.find((task: Task) => task.id === other.id).subtasks, [otherChild]);
+  assert.equal(f.reads.tasks - beforeReads.tasks, 1);
+  assert.equal(f.reads.subtasks - beforeReads.subtasks, 0);
+  assert.deepEqual((await f.request("GET", `/${parent.id}`)).body.subtasks, expected);
+  const patched = await f.request("PATCH", `/${parent.id}`, { title: "Edited", archived: true });
+  assert.equal(patched.status, 200);
+  assert.deepEqual(patched.body.subtasks, expected);
+  assert.deepEqual((await f.request("GET", "?archived=true")).body[0].subtasks, expected);
+  assert.deepEqual((await f.request("GET", `/${parent.id}`)).body.subtasks, expected);
+});
+
+test("Task responses omit the final soft-deleted subtask", async (t) => {
+  const f = await fixture(t);
+  const task = await f.create();
+  const child = await f.createSubtask(task.id);
+  assert.equal((await f.request("DELETE", `/${task.id}/subtasks/${child.id}`)).status, 204);
+  assert.ok(f.state().subtasks[0].deletedAt);
+  assert.deepEqual((await f.request("GET")).body[0].subtasks, []);
+  assert.deepEqual((await f.request("GET", `/${task.id}`)).body.subtasks, []);
+  assert.deepEqual((await f.request("PATCH", `/${task.id}`, { title: "Edited" })).body.subtasks, []);
+});
+
+test("subtask CRUD validates fields, cancellation and UUIDs and returns subtask DTOs", async (t) => {
   const f = await fixture(t);
   const parent = await f.create();
   const path = `/${parent.id}/subtasks`;
@@ -392,7 +462,7 @@ test("subtask CRUD validates fields, cancellation and UUIDs without changing the
   assert.equal(subtask.cancellationNote, null);
   assert.equal(subtask.deletedAt, null);
   assert.ok(subtask.createdAt && subtask.updatedAt);
-  for (const key of ["plannedAt", "dueAt", "priority", "isCompleted"]) assert.ok(!(key in subtask));
+  for (const key of ["plannedAt", "dueAt", "priority", "isCompleted", "subtasks"]) assert.ok(!(key in subtask));
   const item = `${path}/${subtask.id}`;
   for (const body of [{}, { title: " " }, { status: "UNKNOWN" }, { status: "CANCELED" },
     { status: "CANCELED", cancellationNote: " " }, { cancellationNote: null },
@@ -403,6 +473,7 @@ test("subtask CRUD validates fields, cancellation and UUIDs without changing the
   assert.equal(canceled.status, 200);
   assert.equal(canceled.body.title, "Renamed");
   assert.equal(canceled.body.cancellationNote, "Reason");
+  assert.deepEqual(Object.keys(canceled.body).sort(), Object.keys(subtask).sort());
   const reopened = await f.request("PATCH", item, { status: "PAUSED" });
   assert.equal(reopened.body.cancellationNote, "Reason");
   assert.equal((await f.request("GET", path)).body.length, 1);
@@ -523,6 +594,104 @@ test("subtask changes synchronize active and completed statuses and preserve oth
     before: { status: "IN_PROGRESS", cancellationNote: "Parent reason" },
     after: { status: "DONE", cancellationNote: "Parent reason" },
   });
+});
+
+test("soft deletion recalculates parent status and duration using only live subtasks", async (t) => {
+  for (const remainingStatuses of [["TODO"], ["DONE", "DONE"], ["IN_PROGRESS"], ["TODO", "DONE"], ["PAUSED"]]) {
+    await t.test(remainingStatuses.join(" + "), async (t) => {
+      const f = await fixture(t);
+      const parent = await f.create();
+      for (const status of remainingStatuses) {
+        await f.createSubtask(parent.id, { status, estimatedDurationMinutes: 7 });
+      }
+      const removed = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 11 });
+      const alreadyDeleted = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 100 });
+      assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${alreadyDeleted.id}`)).status, 204);
+      const actionCount = f.state().actions.length;
+      assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${removed.id}`)).status, 204);
+      const expectedStatus = remainingStatuses.every((status) => status === "TODO") ? "TODO"
+        : remainingStatuses.every((status) => status === "DONE") ? "DONE" : "IN_PROGRESS";
+      const duration = remainingStatuses.length * 7;
+      const result = await f.request("GET", `/${parent.id}`);
+      assert.equal(result.body.status, expectedStatus);
+      assert.equal(result.body.estimatedDurationMinutes, duration);
+      assert.equal(result.body.subtasks.length, remainingStatuses.length);
+      assert.ok(f.state().subtasks.find((child) => child.id === removed.id)!.deletedAt);
+      const actions = f.state().actions.slice(actionCount);
+      assert.deepEqual(actions.map((action) => action.type), [
+        "SUBTASK_DELETED", "EDITED", ...(expectedStatus === "IN_PROGRESS" ? [] : ["STATUS_CHANGED"]),
+      ]);
+      assert.deepEqual(actions[1].metadata, {
+        subtaskId: removed.id,
+        before: { estimatedDurationMinutes: duration + 11 },
+        after: { estimatedDurationMinutes: duration },
+      });
+      if (expectedStatus !== "IN_PROGRESS") {
+        assert.deepEqual(actions[2].metadata, {
+          subtaskId: removed.id,
+          before: { status: "IN_PROGRESS", cancellationNote: null },
+          after: { status: expectedStatus, cancellationNote: null },
+        });
+      }
+    });
+  }
+});
+
+test("status changes reset IN_PROGRESS to TODO and ignore soft-deleted subtasks", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const child = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 5 });
+  await f.createSubtask(parent.id, { estimatedDurationMinutes: 7 });
+  const deleted = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 100 });
+  await f.request("DELETE", `/${parent.id}/subtasks/${deleted.id}`);
+  const actionCount = f.state().actions.length;
+  const result = await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { status: "TODO" });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.id, child.id);
+  const updated = (await f.request("GET", `/${parent.id}`)).body;
+  assert.equal(updated.status, "TODO");
+  assert.equal(updated.estimatedDurationMinutes, 12);
+  const actions = f.state().actions.slice(actionCount);
+  assert.deepEqual(actions.map((action) => action.type), ["SUBTASK_STATUS_CHANGED", "STATUS_CHANGED"]);
+  assert.deepEqual(actions[1].metadata, {
+    subtaskId: child.id,
+    before: { status: "IN_PROGRESS", cancellationNote: null },
+    after: { status: "TODO", cancellationNote: null },
+  });
+  const nextActionCount = f.state().actions.length;
+  await f.request("PATCH", `/${parent.id}/subtasks/${child.id}`, { title: "Edited" });
+  assert.equal((await f.request("GET", `/${parent.id}`)).body.status, "TODO");
+  assert.deepEqual(f.state().actions.slice(nextActionCount).map((action) => action.type), ["SUBTASK_EDITED"]);
+});
+
+test("deleting the final IN_PROGRESS subtask preserves parent status and duration", async (t) => {
+  const f = await fixture(t);
+  const parent = await f.create();
+  const child = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 13 });
+  const actionCount = f.state().actions.length;
+  assert.equal((await f.request("DELETE", `/${parent.id}/subtasks/${child.id}`)).status, 204);
+  const updated = (await f.request("GET", `/${parent.id}`)).body;
+  assert.equal(updated.status, "IN_PROGRESS");
+  assert.equal(updated.estimatedDurationMinutes, 13);
+  assert.deepEqual(updated.subtasks, []);
+  assert.deepEqual(f.state().actions.slice(actionCount).map((action) => action.type), ["SUBTASK_DELETED"]);
+});
+
+test("resetting parent to TODO rolls back the subtask, duration and events on journal failure", async (t) => {
+  for (const method of ["PATCH", "DELETE"]) {
+    for (let failureAt = 0; failureAt < (method === "PATCH" ? 2 : 3); failureAt++) {
+      const f = await fixture(t);
+      const parent = await f.create();
+      await f.createSubtask(parent.id, { estimatedDurationMinutes: 7 });
+      const child = await f.createSubtask(parent.id, { status: "IN_PROGRESS", estimatedDurationMinutes: 11 });
+      const before = structuredClone(f.state());
+      f.failEvents(failureAt);
+      const result = await f.request(method, `/${parent.id}/subtasks/${child.id}`,
+        method === "PATCH" ? { status: "TODO" } : undefined);
+      assert.equal(result.status, 500, `${method}, journal index ${failureAt}`);
+      assert.deepEqual(f.state(), before, `${method}, journal index ${failureAt}`);
+    }
+  }
 });
 
 test("manual parent statuses never cascade; adding or reopening under DONE follows precedence", async (t) => {
