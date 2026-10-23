@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TaskStatus } from "../../generated/prisma/client";
 import { ApiError } from "../../lib/api-error";
-import { taskFields } from "./tasks.schemas";
+import { taskFields } from "./tasks.fields";
 
 const fields = {
   title: taskFields.title,
@@ -9,6 +9,11 @@ const fields = {
   estimatedDurationMinutes: taskFields.duration,
   cancellationNote: taskFields.note,
 };
+
+export const initialSubtaskSchema = z.strictObject({
+  title: fields.title,
+  estimatedDurationMinutes: fields.estimatedDurationMinutes,
+});
 const canceledRequiresNote = (data: { status?: string; cancellationNote?: string }) =>
   data.status !== "CANCELED" || data.cancellationNote !== undefined;
 const cancellationError = {

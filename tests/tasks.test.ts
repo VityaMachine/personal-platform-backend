@@ -21,10 +21,13 @@ const input = {
 
 // Transactional in-memory Prisma boundary: HTTP tests need no database credentials.
 // Writes are available only on tx; a failed event discards the entire draft.
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
+  const tieSubtaskTimestamps = initialSubtaskIds.length > 0;
   let state: { tasks: Task[]; actions: TaskAction[]; subtasks: Subtask[] } = { tasks: [], actions: [], subtasks: [] };
   let writesBeforeFailure: number | undefined;
   let conflicts = 0;
+  let commitConflicts = 0;
+  let subtasksBeforeFailure: number | undefined;
   let attempts = 0;
   const reads = { tasks: 0, subtasks: 0 };
   function taskResult(db: typeof state, task: Task, include?: Prisma.TaskInclude) {
@@ -87,9 +90,10 @@ async function fixture(t: TestContext) {
         return structuredClone(db.subtasks.find((subtask) => subtask.id === where.id && subtask.taskId === where.taskId && subtask.deletedAt === null) ?? null);
       },
       async create({ data }: { data: Pick<Subtask, "taskId" | "title" | "estimatedDurationMinutes"> & Partial<Subtask> }) {
+        if (subtasksBeforeFailure !== undefined && subtasksBeforeFailure-- <= 0) throw new Error("Simulated subtask write failure");
         const subtask: Subtask = {
-          id: randomUUID(), status: "TODO", cancellationNote: null, deletedAt: null,
-          createdAt: new Date(), updatedAt: new Date(), ...data,
+          id: initialSubtaskIds.shift() ?? randomUUID(), status: "TODO", cancellationNote: null, deletedAt: null,
+          createdAt: tieSubtaskTimestamps ? new Date("2026-10-23T10:00:00Z") : new Date(), updatedAt: new Date(), ...data,
         };
         db.subtasks.push(subtask);
         return structuredClone(subtask);
@@ -112,6 +116,7 @@ async function fixture(t: TestContext) {
       if (conflicts-- > 0) throw new Prisma.PrismaClientKnownRequestError("Conflict", { code: "P2034", clientVersion: "7.10.1" });
       const draft = structuredClone(state);
       const result = await work(delegates(draft));
+      if (commitConflicts-- > 0) throw new Prisma.PrismaClientKnownRequestError("Commit conflict", { code: "P2034", clientVersion: "7.10.1" });
       state = draft;
       return result;
     },
@@ -136,6 +141,8 @@ async function fixture(t: TestContext) {
   return {
     request, logs, reads, state: () => state, failEvents: (after = 0) => { writesBeforeFailure = after; },
     conflicts: (count: number) => { conflicts = count; }, attempts: () => attempts,
+    commitConflicts: (count: number) => { commitConflicts = count; },
+    failSubtasks: (after = 0) => { subtasksBeforeFailure = after; },
     async create() {
       const result = await request("POST", "", input);
       assert.equal(result.status, 201);
@@ -150,6 +157,148 @@ async function fixture(t: TestContext) {
     },
   };
 }
+
+const initialSubtasks = [
+  { title: "  Update task list  ", estimatedDurationMinutes: 40 },
+  { title: "Check on mobile", estimatedDurationMinutes: 20 },
+];
+
+test("creation with omitted or empty subtasks preserves the original contract", async (t) => {
+  const f = await fixture(t);
+  for (const extra of [{}, { subtasks: [] }]) {
+    const result = await f.request("POST", "", { ...input, ...extra });
+    assert.equal(result.status, 201);
+    assert.equal(result.body.estimatedDurationMinutes, 45);
+    assert.equal(result.body.status, "TODO");
+    assert.deepEqual(result.body.subtasks, []);
+    const { estimatedDurationMinutes, ...missingDuration } = input;
+    assert.equal((await f.request("POST", "", { ...missingDuration, ...extra })).status, 400);
+    for (const status of ["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED"]) {
+      assert.equal((await f.request("POST", "", { ...input, ...extra, status })).status, 400);
+    }
+  }
+  assert.equal(f.attempts(), 2);
+  assert.deepEqual(f.state().actions.map((action) => action.type), ["CREATED", "CREATED"]);
+});
+
+test("creation with subtasks returns the complete sorted DTO and only creation events", async (t) => {
+  const ids = ["00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"];
+  const f = await fixture(t, [...ids]);
+  const result = await f.request("POST", "", {
+    title: "  Update UI  ", dueAt: input.dueAt, subtasks: initialSubtasks,
+  });
+  assert.equal(result.status, 201);
+  assert.equal(f.attempts(), 1);
+  const parent = f.state().tasks[0];
+  const expectedChildren = JSON.parse(JSON.stringify([...f.state().subtasks].reverse()));
+  assert.deepEqual(result.body, {
+    ...JSON.parse(JSON.stringify(parent)), isCompleted: false, subtasks: expectedChildren,
+  });
+  assert.equal(result.body.title, "Update UI");
+  assert.equal(result.body.estimatedDurationMinutes, 60);
+  assert.equal(result.body.priority, "MEDIUM");
+  assert.equal(result.body.plannedAt, null);
+  assert.equal(result.body.status, "TODO");
+  assert.equal(f.state().subtasks[0].title, "Update task list");
+  for (const child of f.state().subtasks) {
+    assert.equal(child.status, "TODO");
+    assert.equal(child.taskId, parent.id);
+    assert.equal(child.cancellationNote, null);
+    assert.equal(child.deletedAt, null);
+  }
+  const [created, ...children] = f.state().actions;
+  assert.deepEqual(f.state().actions.map((action) => action.type), ["CREATED", "SUBTASK_CREATED", "SUBTASK_CREATED"]);
+  assert.equal(created.taskId, parent.id);
+  assert.deepEqual(created.metadata, { before: null, after: JSON.parse(JSON.stringify(parent)) });
+  for (const [index, action] of children.entries()) {
+    assert.equal(action.taskId, parent.id);
+    assert.deepEqual(action.metadata, {
+      subtaskId: ids[index], before: null, after: JSON.parse(JSON.stringify(f.state().subtasks[index])),
+    });
+  }
+  assert.deepEqual((await f.request("GET", `/${parent.id}`)).body, result.body);
+  assert.equal((await f.request("GET", `/${parent.id}/subtasks`)).status, 200);
+  assert.equal((await f.request("PATCH", `/${parent.id}`, { estimatedDurationMinutes: 60 })).status, 409);
+  await f.createSubtask(parent.id);
+});
+
+test("valid parent duration is checked but replaced by the subtask sum", async (t) => {
+  const f = await fixture(t);
+  for (const estimatedDurationMinutes of [1, 999, 2_147_483_647]) {
+    const result = await f.request("POST", "", {
+      ...input, estimatedDurationMinutes, status: "TODO", priority: "HIGH", subtasks: initialSubtasks,
+    });
+    assert.equal(result.status, 201);
+    assert.equal(result.body.estimatedDurationMinutes, 60);
+    assert.equal(result.body.priority, "HIGH");
+    assert.equal(result.body.plannedAt, "2026-10-22T06:00:00.000Z");
+    assert.equal(result.body.status, "TODO");
+  }
+});
+
+test("invalid nested creation and duration overflow fail before opening a transaction", async (t) => {
+  const f = await fixture(t);
+  const body = { title: input.title, dueAt: input.dueAt, subtasks: initialSubtasks };
+  const invalidChildren: unknown[] = [
+    null, [], "child", {}, { title: "Missing duration" }, { estimatedDurationMinutes: 5 },
+    ...["", " ", "x".repeat(161), null, 1].map((title) => ({ title, estimatedDurationMinutes: 5 })),
+    ...[0, -1, 1.5, "30", null, 2_147_483_648].map((estimatedDurationMinutes) => ({ title: "Child", estimatedDurationMinutes })),
+    ...["status", "cancellationNote", "id", "taskId", "plannedAt", "dueAt", "priority"].map((key) => ({
+      title: "Child", estimatedDurationMinutes: 5, [key]: key === "status" ? "DONE" : "unexpected",
+    })),
+  ];
+  const invalid = [
+    ...invalidChildren.map((child) => ({ ...body, subtasks: [initialSubtasks[0], child] })),
+    ...[null, {}, "children", 1, true].map((subtasks) => ({ ...body, subtasks })),
+    ...[0, -1, 1.5, "30", null, 2_147_483_648].map((estimatedDurationMinutes) => ({ ...body, estimatedDurationMinutes })),
+    ...["IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED", "UNKNOWN", null, 1].map((status) => ({ ...body, status })),
+    { ...body, dueAt: undefined }, { ...body, dueAt: null }, { ...body, plannedAt: null },
+    { ...body, subtasks: [{ title: "Max", estimatedDurationMinutes: 2_147_483_647 }, initialSubtasks[1]] },
+  ];
+  for (const data of invalid) {
+    assert.equal((await f.request("POST", "", data)).status, 400, JSON.stringify(data));
+  }
+  assert.equal(f.attempts(), 0);
+  assert.deepEqual(f.state(), { tasks: [], subtasks: [], actions: [] });
+  const atLimit = await f.request("POST", "", {
+    ...body, subtasks: [{ title: "Almost max", estimatedDurationMinutes: 2_147_483_646 }, { title: "Last", estimatedDurationMinutes: 1 }],
+  });
+  assert.equal(atLimit.status, 201);
+  assert.equal(atLimit.body.estimatedDurationMinutes, 2_147_483_647);
+});
+
+test("nested creation rolls back the parent, children and journal on every write failure", async (t) => {
+  for (const kind of ["subtask", "event"] as const) {
+    for (let failureAt = 0; failureAt < (kind === "event" ? 3 : 2); failureAt++) {
+      const f = await fixture(t);
+      await f.create();
+      const before = structuredClone(f.state());
+      if (kind === "event") f.failEvents(failureAt);
+      else f.failSubtasks(failureAt);
+      const result = await f.request("POST", "", { ...input, subtasks: initialSubtasks });
+      assert.equal(result.status, 500, `${kind} ${failureAt}`);
+      assert.deepEqual(f.state(), before, `${kind} ${failureAt}`);
+      assert.equal(f.attempts(), 2);
+    }
+  }
+});
+
+test("nested creation retries conflicts after all writes without duplicating records or events", async (t) => {
+  const f = await fixture(t);
+  f.commitConflicts(2);
+  const result = await f.request("POST", "", { ...input, subtasks: initialSubtasks });
+  assert.equal(result.status, 201);
+  assert.equal(f.attempts(), 3);
+  assert.equal(f.state().tasks.length, 1);
+  assert.equal(f.state().subtasks.length, 2);
+  assert.deepEqual(f.state().actions.map((action) => action.type), ["CREATED", "SUBTASK_CREATED", "SUBTASK_CREATED"]);
+  assert.deepEqual(new Set(f.state().subtasks.map((child) => child.id)), new Set(result.body.subtasks.map((child: Subtask) => child.id)));
+  const before = structuredClone(f.state());
+  f.commitConflicts(3);
+  assert.equal((await f.request("POST", "", { ...input, subtasks: initialSubtasks })).status, 409);
+  assert.equal(f.attempts(), 6);
+  assert.deepEqual(f.state(), before);
+});
 
 test("creation requires deadline and duration, validates types and logs normalized values", async (t) => {
   const f = await fixture(t);

@@ -37,9 +37,15 @@ export function createTasksService(repository: TasksRepository) {
     },
     get: findTask,
     create(data: CreateTaskInput) {
+      const { subtasks = [], ...fields } = data;
       return transaction(async (tx) => {
-        const created = await tx.create({ ...data, plannedAt: data.plannedAt ?? null });
+        const created = await tx.create({ ...fields, plannedAt: fields.plannedAt ?? null });
         await tx.createAction(created.id, "CREATED", { before: null, after: created });
+        for (const subtask of subtasks) {
+          const child = await tx.createSubtask(created.id, { ...subtask, status: "TODO" });
+          await tx.createAction(created.id, "SUBTASK_CREATED", { subtaskId: child.id, before: null, after: child });
+        }
+        if (subtasks.length) return findTask(created.id, tx);
         return { ...created, subtasks: [] } satisfies TaskWithSubtasks;
       });
     },

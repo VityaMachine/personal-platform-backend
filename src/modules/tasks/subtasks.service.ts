@@ -2,6 +2,7 @@ import type { Subtask, Task } from "../../generated/prisma/client";
 import { ApiError } from "../../lib/api-error";
 import type { TasksTransactionRepository } from "./tasks.repository";
 import type { CreateSubtaskInput, UpdateSubtaskInput } from "./subtasks.schemas";
+import { sumSubtaskDurations } from "./tasks.fields";
 
 type Transaction = TasksTransactionRepository;
 type Dependencies = {
@@ -26,8 +27,7 @@ export function createSubtasksService({ findTask, transaction }: Dependencies) {
     const subtasks = await tx.findSubtasks(parent.id);
     // Keep the last duration and status after deleting the final subtask.
     if (!subtasks.length) return;
-    const duration = subtasks.reduce((sum, subtask) => sum + subtask.estimatedDurationMinutes, 0);
-    if (duration > 2_147_483_647) throw new ApiError(400, "Total subtask duration exceeds the supported limit.");
+    const duration = sumSubtaskDurations(subtasks);
     let status = parent.status;
     if (subtasks.every((subtask) => subtask.status === "TODO")) status = "TODO";
     else if (subtasks.every((subtask) => subtask.status === "DONE")) status = "DONE";

@@ -2,13 +2,11 @@ import { z } from "zod";
 
 import { TaskPriority, TaskStatus } from "../../generated/prisma/client";
 import { ApiError } from "../../lib/api-error";
+import { sumSubtaskDurations, taskFields } from "./tasks.fields";
+import { initialSubtaskSchema } from "./subtasks.schemas";
 
-const title = z.string().trim().min(1).max(160);
+const { title, duration, note } = taskFields;
 const dateTime = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
-const duration = z.number().int().positive().max(2_147_483_647);
-const note = z.string().trim().min(1);
-
-export const taskFields = { title, duration, note };
 
 export const createTaskSchema = z.strictObject({
   title,
@@ -16,8 +14,24 @@ export const createTaskSchema = z.strictObject({
   plannedAt: dateTime.optional(),
   priority: z.enum(TaskPriority).default("MEDIUM"),
   dueAt: dateTime,
-  estimatedDurationMinutes: duration,
-});
+  estimatedDurationMinutes: duration.optional(),
+  status: z.literal("TODO").optional(),
+  subtasks: z.array(initialSubtaskSchema).optional(),
+}).superRefine((data, ctx) => {
+  if (!data.subtasks?.length) {
+    if (data.estimatedDurationMinutes === undefined) {
+      ctx.addIssue({ code: "custom", path: ["estimatedDurationMinutes"], message: "Duration is required without subtasks." });
+    }
+    if (data.status !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["status"], message: "Status is only accepted when creating subtasks." });
+    }
+  }
+}).transform((data) => ({
+  ...data,
+  // The refinement requires a duration when there are no initial subtasks.
+  estimatedDurationMinutes: data.subtasks?.length
+    ? sumSubtaskDurations(data.subtasks) : data.estimatedDurationMinutes!,
+}));
 
 export const updateTaskSchema = z.strictObject({
   title: title.optional(),
