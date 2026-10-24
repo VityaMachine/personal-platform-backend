@@ -1,7 +1,9 @@
 import { Prisma, type PrismaClient, type TaskActionType } from "../../generated/prisma/client";
 import { getPrisma } from "../../lib/prisma";
+import { lockArea } from "../areas/areas.repository";
 
 const taskInclude = {
+  area: { select: { id: true, name: true } },
   subtasks: {
     where: { deletedAt: null },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -18,12 +20,13 @@ function createTaskQueries(db: Prisma.TransactionClient) {
     findFirst(where: Prisma.TaskWhereInput) {
       return db.task.findFirst({ where, include: taskInclude });
     },
-    create(data: Prisma.TaskCreateInput) {
+    create(data: Prisma.TaskUncheckedCreateInput) {
       return db.task.create({ data });
     },
-    update(id: string, data: Prisma.TaskUpdateInput) {
+    update(id: string, data: Prisma.TaskUncheckedUpdateInput) {
       return db.task.update({ where: { id }, data, include: taskInclude });
     },
+    findAreaForAssignment(id: string) { return lockArea(db, id); },
     createAction(taskId: string, type: TaskActionType, metadata: unknown) {
       const json: Prisma.InputJsonValue = JSON.parse(JSON.stringify(metadata));
       return db.taskAction.create({ data: { taskId, type, metadata: json } });

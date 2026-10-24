@@ -1,0 +1,19 @@
+BEGIN;
+
+ALTER TYPE "TaskActionType" ADD VALUE 'AREA_CHANGED';
+
+CREATE TABLE "Area" (
+    "id" UUID NOT NULL,
+    "name" VARCHAR(80) NOT NULL,
+    "createdAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMPTZ(3) NOT NULL,
+    "archivedAt" TIMESTAMPTZ(3),
+    CONSTRAINT "Area_pkey" PRIMARY KEY ("id")
+);
+
+ALTER TABLE "Task" ADD COLUMN "areaId" UUID;
+CREATE INDEX "Task_areaId_idx" ON "Task"("areaId");
+ALTER TABLE "Task" ADD CONSTRAINT "Task_areaId_fkey"
+    FOREIGN KEY ("areaId") REFERENCES "Area"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+COMMIT;

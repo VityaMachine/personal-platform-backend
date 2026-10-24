@@ -7,9 +7,11 @@ import { initialSubtaskSchema } from "./subtasks.schemas";
 
 const { title, duration, note } = taskFields;
 const dateTime = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
+const areaId = z.uuid().transform((value) => value.toLowerCase()).nullable().optional();
 
 export const createTaskSchema = z.strictObject({
   title,
+  areaId,
   description: z.string().nullable().optional(),
   plannedAt: dateTime.optional(),
   priority: z.enum(TaskPriority).default("MEDIUM"),
@@ -35,6 +37,7 @@ export const createTaskSchema = z.strictObject({
 
 export const updateTaskSchema = z.strictObject({
   title: title.optional(),
+  areaId,
   description: z.string().nullable().optional(),
   status: z.enum(TaskStatus).optional(),
   priority: z.enum(TaskPriority).optional(),

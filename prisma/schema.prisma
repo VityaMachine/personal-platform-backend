@@ -35,6 +35,7 @@ enum TaskActionType {
   SUBTASK_EDITED
   SUBTASK_STATUS_CHANGED
   SUBTASK_DELETED
+  AREA_CHANGED
 }
 
 model Task {
@@ -53,8 +54,19 @@ model Task {
   updatedAt                DateTime   @updatedAt @db.Timestamptz(3)
   actions                  TaskAction[]
   subtasks                 Subtask[]
+  areaId                   String?    @db.Uuid
+  area                     Area?      @relation(fields: [areaId], references: [id], onDelete: Restrict)
 
   @@index([deletedAt, archivedAt, createdAt])
+  @@index([areaId])
+}
+
+model Area {
+  id         String    @id @default(uuid()) @db.Uuid
+  name       String    @db.VarChar(80)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+  tasks      Task[]
 }
 
 model Subtask {

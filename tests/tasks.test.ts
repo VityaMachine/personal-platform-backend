@@ -6,11 +6,12 @@ import { test, type TestContext } from "node:test";
 import express from "express";
 
 import { app } from "../src/app";
-import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask } from "../src/generated/prisma/client";
+import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, type Area } from "../src/generated/prisma/client";
 import { errorHandler } from "../src/middleware/error-handler";
 import { createRequestLogger } from "../src/middleware/request-logger";
 import { createLogger } from "../src/lib/logger";
 import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
+import { createAreasRouter } from "../src/modules/areas/areas.routes";
 import { calculateTaskSummary, type TaskSummary } from "../src/modules/tasks/tasks.summary";
 
 const input = {
@@ -24,35 +25,104 @@ const input = {
 // Writes are available only on tx; a failed event discards the entire draft.
 async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
   const tieSubtaskTimestamps = initialSubtaskIds.length > 0;
-  let state: { tasks: Task[]; actions: TaskAction[]; subtasks: Subtask[] } = { tasks: [], actions: [], subtasks: [] };
+  let state: { tasks: Task[]; actions: TaskAction[]; subtasks: Subtask[]; areas: Area[] } = { tasks: [], actions: [], subtasks: [], areas: [] };
   let writesBeforeFailure: number | undefined;
   let conflicts = 0;
   let commitConflicts = 0;
   let subtasksBeforeFailure: number | undefined;
+  let taskWritesBeforeFailure: number | undefined;
+  let areaDeleteFailure = false;
   let attempts = 0;
   let fixedTime: Date | undefined;
+  let deleteOnAssignmentConflict: string | undefined;
+  let rawConflictCode = "P2034";
   const now = () => fixedTime ? new Date(fixedTime) : new Date();
-  const reads = { tasks: 0, subtasks: 0, history: 0 };
+  const reads = { tasks: 0, subtasks: 0, history: 0, areas: 0, areaLocks: 0 };
+  const operations: string[] = [];
   function taskResult(db: typeof state, task: Task, include?: Prisma.TaskInclude) {
     if (!include) return structuredClone(task);
     assert.deepEqual(include, {
+      area: { select: { id: true, name: true } },
       subtasks: { where: { deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
     });
     return structuredClone({
       ...task,
+      area: (() => {
+        const area = db.areas.find((area) => area.id === task.areaId);
+        return area ? { id: area.id, name: area.name } : null;
+      })(),
       subtasks: db.subtasks.filter((child) => child.taskId === task.id && child.deletedAt === null)
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id)),
     });
   }
   const delegates = (db: typeof state) => ({
+    async $queryRaw(strings: TemplateStringsArray, id: string) {
+      reads.areaLocks++;
+      operations.push(`area-lock:${id}`);
+      assert.match(strings.join("?"), /FROM "Area" WHERE "id" = \?::uuid FOR UPDATE/);
+      if (deleteOnAssignmentConflict === id) {
+        deleteOnAssignmentConflict = undefined;
+        const area = state.areas.find((area) => area.id === id)!;
+        for (const task of state.tasks.filter((task) => task.areaId === id)) {
+          task.areaId = null;
+          task.updatedAt = now();
+          state.actions.push({ id: randomUUID(), taskId: task.id, type: "AREA_CHANGED", timestamp: now(), metadata: {
+            before: { areaId: id, area: { id, name: area.name } }, after: { areaId: null, area: null },
+          } });
+        }
+        state.areas = state.areas.filter((area) => area.id !== id);
+        throw new Prisma.PrismaClientKnownRequestError("Concurrent deletion", {
+          code: rawConflictCode, clientVersion: "7.10.1",
+          meta: rawConflictCode === "P2010" ? { driverAdapterError: { cause: { kind: "TransactionWriteConflict", originalCode: "40001" } } } : undefined,
+        });
+      }
+      return structuredClone(db.areas.filter((area) => area.id === id));
+    },
+    area: {
+      async findMany({ orderBy }: { orderBy: unknown }) {
+        reads.areas++;
+        assert.deepEqual(orderBy, [{ name: "asc" }, { id: "asc" }]);
+        return structuredClone([...db.areas]
+          .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)));
+      },
+      async create({ data }: { data: { name: string } }) {
+        const area: Area = { id: randomUUID(), createdAt: now(), updatedAt: now(), ...data };
+        db.areas.push(area);
+        return structuredClone(area);
+      },
+      async update({ where, data }: { where: { id: string }; data: Partial<Area> }) {
+        const area = db.areas.find((area) => area.id === where.id)!;
+        Object.assign(area, data, { updatedAt: now() });
+        return structuredClone(area);
+      },
+      async delete({ where }: { where: { id: string } }) {
+        operations.push(`area-delete:${where.id}`);
+        if (areaDeleteFailure) throw new Error("Simulated area deletion failure");
+        assert.ok(!db.tasks.some((task) => task.areaId === where.id), "FK RESTRICT: every task must be detached first");
+        const area = db.areas.find((area) => area.id === where.id)!;
+        db.areas = db.areas.filter((area) => area.id !== where.id);
+        return structuredClone(area);
+      },
+    },
     task: {
       async findFirst({ where, include }: { where: { id: string; deletedAt: null }; include?: Prisma.TaskInclude }) {
         reads.tasks++;
         const task = db.tasks.find((task) => task.id === where.id && task.deletedAt === where.deletedAt);
         return task ? taskResult(db, task, include) : null;
       },
-      async findMany({ where, include }: { where: { deletedAt: null; archivedAt: null | { not: null } }; include?: Prisma.TaskInclude }) {
+      async findMany({ where, include, select, orderBy }: {
+        where: { deletedAt?: null; archivedAt?: null | { not: null }; areaId?: string };
+        include?: Prisma.TaskInclude; select?: unknown; orderBy?: unknown;
+      }) {
         reads.tasks++;
+        if (where.areaId !== undefined) {
+          operations.push(`linked-tasks:${where.areaId}`);
+          assert.deepEqual(where, { areaId: where.areaId });
+          assert.deepEqual(orderBy, { id: "asc" });
+          assert.deepEqual(select, { id: true });
+          return db.tasks.filter((task) => task.areaId === where.areaId)
+            .sort((a, b) => a.id.localeCompare(b.id)).map((task) => ({ id: task.id }));
+        }
         return db.tasks.filter((task) => task.deletedAt === where.deletedAt &&
           (where.archivedAt === null ? task.archivedAt === null : task.archivedAt !== null))
           .map((task) => taskResult(db, task, include));
@@ -60,6 +130,7 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
       async create({ data }: { data: Partial<Task> }) {
         const task: Task = {
           id: randomUUID(), title: "", description: null, status: "TODO", priority: "MEDIUM",
+          areaId: null,
           plannedAt: null, dueAt: null, estimatedDurationMinutes: 1,
           cancellationNote: null, archivedAt: null, deletedAt: null,
           createdAt: now(), updatedAt: now(), ...data,
@@ -68,6 +139,9 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
         return structuredClone(task);
       },
       async update({ where, data, include }: { where: { id: string }; data: Partial<Task>; include?: Prisma.TaskInclude }) {
+        operations.push(`task-update:${where.id}`);
+        if (taskWritesBeforeFailure !== undefined && taskWritesBeforeFailure-- <= 0) throw new Error("Simulated task write failure");
+        if (data.areaId) assert.ok(db.areas.some((area) => area.id === data.areaId), "FK target must exist");
         const task = db.tasks.find((task) => task.id === where.id)!;
         Object.assign(task, data, { updatedAt: now() });
         return taskResult(db, task, include);
@@ -75,6 +149,7 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
     },
     taskAction: {
       async create({ data }: { data: Omit<TaskAction, "id" | "timestamp"> }) {
+        operations.push(`event:${data.taskId}:${data.type}`);
         if (writesBeforeFailure !== undefined && writesBeforeFailure-- <= 0) throw new Error("Simulated event write failure");
         const action = { id: randomUUID(), timestamp: now(), ...data };
         db.actions.push(action);
@@ -117,6 +192,9 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
     },
   });
   const client = {
+    area: {
+      findMany: (args: Parameters<ReturnType<typeof delegates>["area"]["findMany"]>[0]) => delegates(state).area.findMany(args),
+    },
     task: {
       findMany: (args: Parameters<ReturnType<typeof delegates>["task"]["findMany"]>[0]) => delegates(state).task.findMany(args),
       findFirst: (args: Parameters<ReturnType<typeof delegates>["task"]["findFirst"]>[0]) => delegates(state).task.findFirst(args),
@@ -137,24 +215,39 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
   app.use(createRequestLogger(createLogger("production", { write(line) { logs.push(line); } })));
   app.use(express.json());
   app.use("/api/tasks", createTasksRouter(() => client, now));
+  app.use("/api/areas", createAreasRouter(() => client));
   app.use(errorHandler);
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/tasks`;
-  async function request(method: string, path = "", body?: unknown) {
-    const response = await fetch(base + path, {
+  async function send(url: string, method: string, body?: unknown) {
+    const response = await fetch(url, {
       method, headers: { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    return { status: response.status, body: response.status === 204 ? null : await response.json() };
+    return {
+      status: response.status,
+      body: response.status === 204 ? null : response.headers.get("content-type")?.includes("application/json")
+        ? await response.json() : await response.text(),
+    };
   }
+  const request = (method: string, path = "", body?: unknown) => send(base + path, method, body);
+  const areaRequest = (method: string, path = "", body?: unknown) => send(base.replace(/tasks$/, "areas") + path, method, body);
   return {
-    request, logs, reads, state: () => state, setTime: (time: Date) => { fixedTime = time; },
+    request, areaRequest, logs, reads, operations, state: () => state, setTime: (time: Date) => { fixedTime = time; },
+    deleteOnAssignmentConflict: (id: string, code = "P2034") => { deleteOnAssignmentConflict = id; rawConflictCode = code; },
+    failTaskWrites: (after = 0) => { taskWritesBeforeFailure = after; },
+    failAreaDelete: () => { areaDeleteFailure = true; },
     failEvents: (after = 0) => { writesBeforeFailure = after; },
     conflicts: (count: number) => { conflicts = count; }, attempts: () => attempts,
     commitConflicts: (count: number) => { commitConflicts = count; },
     failSubtasks: (after = 0) => { subtasksBeforeFailure = after; },
+    async createArea(name = "Work") {
+      const result = await areaRequest("POST", "", { name });
+      assert.equal(result.status, 201);
+      return result.body as Area;
+    },
     async create() {
       const result = await request("POST", "", input);
       assert.equal(result.status, 201);
@@ -174,6 +267,368 @@ const initialSubtasks = [
   { title: "  Update task list  ", estimatedDurationMinutes: 40 },
   { title: "Check on mobile", estimatedDurationMinutes: 20 },
 ];
+
+test("Areas create, rename and physically delete; lists sort by name then ID and names need not be unique", async (t) => {
+  const f = await fixture(t);
+  const first = await f.createArea("  Work  ");
+  const second = await f.createArea("Work");
+  const third = await f.createArea("Health");
+  assert.equal(first.name, "Work");
+  assert.notEqual(first.id, second.id);
+  assert.deepEqual(Object.keys(first).sort(), ["createdAt", "id", "name", "updatedAt"]);
+  assert.equal(new Date(first.createdAt).toISOString(), first.createdAt);
+  const list = (await f.areaRequest("GET")).body;
+  assert.deepEqual(list.map((area: Area) => area.id), [third.id, ...[first.id, second.id].sort()]);
+  const renamed = await f.areaRequest("PATCH", `/${first.id}`, { name: "  Personal  " });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.body.name, "Personal");
+  assert.equal((await f.areaRequest("GET")).body.length, 3);
+  assert.deepEqual(await f.areaRequest("DELETE", `/${first.id}`), { status: 204, body: null });
+  assert.equal(f.state().areas.some((area) => area.id === first.id), false);
+  assert.equal((await f.areaRequest("GET")).body.length, 2);
+  assert.equal((await f.areaRequest("DELETE", `/${first.id}`)).status, 404);
+  assert.equal((await f.areaRequest("PATCH", `/${first.id}`, { name: "Missing" })).status, 404);
+  assert.equal(f.state().actions.length, 0);
+  const logs = f.logs.map((line) => JSON.parse(line));
+  assert.ok(logs.every((entry) => entry.requestId && entry.path.startsWith("/api/areas")));
+  assert.equal(new Set(logs.map((entry) => entry.requestId)).size, logs.length);
+  assert.ok(!f.logs.join("").includes("Personal"), "request body is not logged");
+});
+
+test("Areas reject invalid names, IDs, body/query types and unknown fields before transactions", async (t) => {
+  const f = await fixture(t);
+  const invalidNames = ["", " \t ", "x".repeat(81), null, 1, true, [], {}];
+  const invalid = [null, [], "name", {}, ...invalidNames.map((name) => ({ name })),
+    { name: "Valid", archived: false }, { name: "Valid", extra: true }];
+  for (const body of invalid) assert.equal((await f.areaRequest("POST", "", body)).status, 400, JSON.stringify(body));
+  for (const query of ["?archived=true", "?archived=false", "?archived=1", "?archived=", "?archived=true&archived=false", "?unknown=true"]) {
+    assert.equal((await f.areaRequest("GET", query)).status, 400);
+  }
+  assert.equal(f.attempts(), 0);
+  const area = await f.createArea("x".repeat(80));
+  const attempts = f.attempts();
+  for (const body of [null, [], {}, { unknown: true }, { archived: true }, { archived: false }, { name: "Valid", archived: true }, { archived: "true" }, { archived: null },
+    { name: "Valid", extra: true }, ...invalidNames.map((name) => ({ name }))]) {
+    const result = await f.areaRequest("PATCH", `/${area.id}`, body);
+    assert.equal(result.status, 400, JSON.stringify(body));
+    assert.ok(result.body.error.message);
+  }
+  assert.deepEqual(await f.areaRequest("PATCH", "/bad-id", {}), {
+    status: 400, body: { error: { message: "Invalid area id." } },
+  });
+  assert.equal(f.attempts(), attempts);
+  assert.equal((await f.areaRequest("DELETE", "/bad-id")).status, 400);
+  for (const method of ["POST", "PATCH", "DELETE"]) {
+    const path = method === "POST" ? "" : `/${area.id}`;
+    assert.equal((await f.areaRequest(method, path + "?archived=false", method === "DELETE" ? undefined : { name: "Valid" })).status, 400);
+  }
+  assert.equal((await f.areaRequest("DELETE", `/${area.id}`, { archived: true })).status, 400);
+  assert.equal((await f.areaRequest("DELETE", `/${randomUUID()}`)).status, 404);
+  assert.deepEqual(await f.areaRequest("PATCH", `/${randomUUID()}`, { name: "Missing" }), {
+    status: 404, body: { error: { message: "Area not found." } },
+  });
+  const error = await f.areaRequest("POST", "", { name: "" });
+  assert.deepEqual(error.body.error.details.map((detail: { path: string[] }) => detail.path), [["name"]]);
+});
+
+test("Tasks create with omitted/null/assigned area and subtasks, preserving summary and snapshots", async (t) => {
+  const f = await fixture(t);
+  f.setTime(new Date("2026-10-24T00:00:00Z"));
+  const area = await f.createArea();
+  for (const subtasks of [undefined, [], initialSubtasks]) {
+    for (const field of [{}, { areaId: null }, { areaId: area.id }]) {
+      const result = await f.request("POST", "", { ...input, ...field, ...(subtasks ? { subtasks } : {}) });
+      assert.equal(result.status, 201);
+      const task = result.body;
+      const assigned = "areaId" in field && field.areaId !== null;
+      assert.equal(task.areaId, assigned ? area.id : null);
+      assert.deepEqual(task.area, assigned ? { id: area.id, name: area.name } : null);
+      assert.equal(task.summary.historyIncomplete, false);
+      assert.equal(task.summary.ageSeconds, 0);
+      assert.equal(task.isCompleted, false);
+      assert.equal(task.subtasks.length, subtasks?.length ?? 0);
+      assert.equal(task.estimatedDurationMinutes, subtasks?.length ? 60 : 45);
+      for (const child of task.subtasks) assert.equal("areaId" in child, false);
+      const actions = f.state().actions.filter((action) => action.taskId === task.id);
+      const after = (actions.find((action) => action.type === "CREATED")!.metadata as { after: Record<string, unknown> }).after;
+      assert.equal(after.areaId, task.areaId);
+      assert.deepEqual(after.area, assigned ? { id: area.id, name: area.name } : null);
+      assert.equal(actions.some((action) => action.type === "AREA_CHANGED"), false);
+      assert.deepEqual((await f.request("GET", `/${task.id}`)).body, task);
+    }
+  }
+  const reads = { ...f.reads };
+  const list = (await f.request("GET")).body;
+  assert.equal(list.length, 9);
+  assert.equal(f.reads.tasks - reads.tasks, 1);
+  assert.equal(f.reads.history - reads.history, 1);
+  assert.equal(f.reads.areas - reads.areas, 0);
+  assert.equal(f.reads.areaLocks - reads.areaLocks, 0);
+  assert.ok(list.every((task: { areaId: string | null; area: unknown }) => task.areaId ? task.area !== null : task.area === null));
+});
+
+test("Task area changes and clearing are journaled once; historical names survive Area edits", async (t) => {
+  const f = await fixture(t);
+  f.setTime(new Date("2026-10-24T00:00:00Z"));
+  const first = await f.createArea("Original");
+  const second = await f.createArea("Second");
+  const created = await f.request("POST", "", { ...input, areaId: first.id });
+  const id = created.body.id;
+  const snapshot = (area: Area) => ({ areaId: area.id, area: { id: area.id, name: area.name } });
+  const creation = structuredClone(f.state().actions[0]);
+  await f.areaRequest("PATCH", `/${first.id}`, { name: "Renamed" });
+  assert.deepEqual(f.state().actions, [creation]);
+  const unchanged = await f.request("PATCH", `/${id}`, { areaId: first.id });
+  assert.equal(unchanged.body.area.name, "Renamed");
+  assert.equal(f.state().actions.length, 1);
+  const omitted = await f.request("PATCH", `/${id}`, { title: "Edited" });
+  assert.equal(omitted.body.areaId, first.id);
+  const changed = await f.request("PATCH", `/${id}`, { areaId: second.id });
+  assert.deepEqual(changed.body.area, { id: second.id, name: second.name });
+  const event = f.state().actions.find((action) => action.type === "AREA_CHANGED")!;
+  assert.deepEqual(event.metadata, {
+    before: snapshot({ ...first, name: "Renamed" }), after: snapshot(second),
+  });
+  const originalEvent = structuredClone(event);
+  await f.areaRequest("PATCH", `/${first.id}`, { name: "Renamed again" });
+  await f.areaRequest("PATCH", `/${second.id}`, { name: "Also renamed" });
+  const cleared = await f.request("PATCH", `/${id}`, { areaId: null });
+  assert.equal(cleared.body.areaId, null);
+  assert.equal(cleared.body.area, null);
+  assert.deepEqual(f.state().actions.at(-1)!.metadata, {
+    before: snapshot({ ...second, name: "Also renamed" }), after: { areaId: null, area: null },
+  });
+  assert.deepEqual(event, originalEvent);
+  assert.deepEqual(f.state().actions[0], creation);
+  assert.deepEqual(cleared.body.summary, created.body.summary);
+  const count = f.state().actions.length;
+  await f.request("PATCH", `/${id}`, { areaId: null });
+  assert.equal(f.state().actions.length, count);
+  const history = (await f.request("GET", `/${id}/history`)).body;
+  assert.deepEqual(history.find((action: TaskAction) => action.id === creation.id), JSON.parse(JSON.stringify(creation)));
+  assert.deepEqual(history.find((action: TaskAction) => action.id === event.id), JSON.parse(JSON.stringify(originalEvent)));
+});
+
+test("same-ID assignments are event-free and lock Area before writing Task", async (t) => {
+  const f = await fixture(t);
+  const area = await f.createArea();
+  const first = (await f.request("POST", "", { ...input, areaId: area.id })).body;
+  const count = f.state().actions.length;
+  const operations = f.operations.length;
+  assert.equal((await f.request("PATCH", `/${first.id}`, { areaId: area.id })).status, 200);
+  assert.equal((await f.request("PATCH", `/${first.id}`, { areaId: area.id.toUpperCase() })).status, 200);
+  assert.equal(f.state().actions.length, count);
+  assert.deepEqual(f.operations.slice(operations), [
+    `area-lock:${area.id}`, `task-update:${first.id}`,
+    `area-lock:${area.id}`, `task-update:${first.id}`,
+  ]);
+});
+
+test("Task area validation rejects malformed IDs and missing/deleted Areas without changing data", async (t) => {
+  const f = await fixture(t);
+  const task = await f.create();
+  const area = await f.createArea();
+  await f.areaRequest("DELETE", `/${area.id}`);
+  const before = structuredClone(f.state());
+  for (const [method, path] of [["POST", ""], ["PATCH", `/${task.id}`]]) {
+    for (const areaId of ["bad-id", "", 1, {}, []]) {
+      assert.equal((await f.request(method, path, { ...(method === "POST" ? input : {}), areaId })).status, 400);
+    }
+    for (const [areaId, status] of [[randomUUID(), 404], [area.id, 404]]) {
+      assert.equal((await f.request(method, path, { ...(method === "POST" ? input : {}), areaId })).status, status);
+    }
+  }
+  assert.deepEqual(f.state(), before);
+  assert.equal((await f.request("POST", `/${task.id}/subtasks`, { title: "Child", estimatedDurationMinutes: 10, areaId: area.id })).status, 400);
+});
+
+test("area assignment and atomic creation roll back on event/subtask failures and retry without duplication", async (t) => {
+  for (const atomic of [false, true]) {
+    for (let failureAt = 0; failureAt < (atomic ? 3 : 1); failureAt++) {
+      const f = await fixture(t);
+      const area = await f.createArea();
+      const before = structuredClone(f.state());
+      f.failEvents(failureAt);
+      const result = await f.request("POST", "", { ...input, areaId: area.id, ...(atomic ? { subtasks: initialSubtasks } : {}) });
+      assert.equal(result.status, 500);
+      assert.deepEqual(f.state(), before);
+    }
+  }
+  const f = await fixture(t);
+  const area = await f.createArea();
+  const task = await f.create();
+  const before = structuredClone(f.state());
+  f.failEvents();
+  assert.equal((await f.request("PATCH", `/${task.id}`, { areaId: area.id, status: "IN_PROGRESS" })).status, 500);
+  assert.deepEqual(f.state(), before);
+  const nested = await fixture(t);
+  const nestedArea = await nested.createArea();
+  nested.failSubtasks(1);
+  assert.equal((await nested.request("POST", "", { ...input, areaId: nestedArea.id, subtasks: initialSubtasks })).status, 500);
+  assert.equal(nested.state().tasks.length, 0);
+  assert.equal(nested.state().actions.length, 0);
+  assert.equal(nested.state().subtasks.length, 0);
+  const retry = await fixture(t);
+  const retryArea = await retry.createArea();
+  retry.commitConflicts(2);
+  const created = await retry.request("POST", "", { ...input, areaId: retryArea.id, subtasks: initialSubtasks });
+  assert.equal(created.status, 201);
+  assert.equal(retry.state().tasks.length, 1);
+  assert.equal(retry.state().subtasks.length, 2);
+  assert.equal(retry.state().actions.length, 3);
+  assert.equal(created.body.summary.historyIncomplete, false);
+  retry.commitConflicts(2);
+  assert.equal((await retry.request("PATCH", `/${created.body.id}`, { areaId: null })).status, 200);
+  assert.equal(retry.state().actions.filter((action) => action.type === "AREA_CHANGED").length, 1);
+});
+
+test("assignment retries revalidate a concurrently deleted Area; Areas also retry serialization conflicts", async (t) => {
+  for (const method of ["POST", "PATCH"]) {
+    const f = await fixture(t);
+    const area = await f.createArea();
+    const task = await f.create();
+    const before = structuredClone(f.state());
+    const attempts = f.attempts();
+    f.deleteOnAssignmentConflict(area.id, method === "POST" ? "P2034" : "P2010");
+    const result = await f.request(method, method === "POST" ? "" : `/${task.id}`,
+      { ...(method === "POST" ? input : {}), areaId: area.id });
+    assert.equal(result.status, 404);
+    assert.equal(f.attempts() - attempts, 2);
+    assert.deepEqual(f.state().tasks, before.tasks);
+    assert.deepEqual(f.state().actions, before.actions);
+    assert.equal(f.state().areas.length, 0);
+  }
+  const f = await fixture(t);
+  f.commitConflicts(2);
+  const area = await f.createArea();
+  assert.equal(f.state().areas.length, 1);
+  assert.equal(f.attempts(), 3);
+  f.commitConflicts(2);
+  assert.equal((await f.areaRequest("PATCH", `/${area.id}`, { name: "Renamed" })).status, 200);
+  const before = structuredClone(f.state());
+  f.conflicts(3);
+  assert.equal((await f.areaRequest("PATCH", `/${area.id}`, { name: "Conflict" })).status, 409);
+  assert.deepEqual(f.state(), before);
+  f.deleteOnAssignmentConflict(area.id, "P2010");
+  assert.equal((await f.areaRequest("PATCH", `/${area.id}`, { name: "After raw conflict" })).status, 404);
+});
+
+test("deleting Area detaches every linked task including archived/deleted, preserving snapshots, summary and other fields", async (t) => {
+  const f = await fixture(t);
+  const at = (seconds: number) => new Date(Date.parse("2026-10-24T00:00:00Z") + seconds * 1000);
+  f.setTime(at(0));
+  const area = await f.createArea("Original");
+  const otherArea = await f.createArea("Other");
+  const ids: string[] = [];
+  for (const status of ["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED"] as const) {
+    const task = (await f.request("POST", "", { ...input, areaId: area.id, subtasks: initialSubtasks })).body;
+    ids.push(task.id);
+    f.setTime(at(10));
+    await f.request("PATCH", `/${task.id}`, { status, ...(status === "CANCELED" ? { cancellationNote: "Reason" } : {}) });
+  }
+  await f.request("PATCH", `/${ids[1]}`, { archived: true });
+  await f.request("DELETE", `/${ids[2]}`);
+  await f.request("PATCH", `/${ids[3]}`, { archived: true });
+  await f.request("DELETE", `/${ids[3]}`);
+  await f.request("POST", "", { ...input, areaId: otherArea.id });
+  await f.create();
+  await f.areaRequest("PATCH", `/${area.id}`, { name: "Name at deletion" });
+  // Simulate an older snapshot; history must be returned verbatim, including archivedAt.
+  const creation = f.state().actions.find((action) => action.taskId === ids[0] && action.type === "CREATED")!;
+  const metadata = creation.metadata as { after: { area: { id: string; name: string; archivedAt?: string } } };
+  metadata.after.area.archivedAt = at(5).toISOString();
+  const before = structuredClone(f.state());
+  f.setTime(at(100));
+  const summaries = new Map(before.tasks.map((task) => [task.id,
+    calculateTaskSummary(task, before.actions.filter((action) => action.taskId === task.id), at(100))]));
+  const dtoBefore = (await f.request("GET", `/${ids[0]}`)).body;
+  const operationIndex = f.operations.length;
+  assert.deepEqual(await f.areaRequest("DELETE", `/${area.id}`), { status: 204, body: null });
+  assert.equal(f.state().areas.some((candidate) => candidate.id === area.id), false);
+  assert.equal(f.state().areas.length, 1);
+  assert.equal(f.state().tasks.length, before.tasks.length);
+  assert.deepEqual(f.state().subtasks, before.subtasks);
+  assert.deepEqual(f.state().actions.slice(0, before.actions.length), before.actions);
+  const events = f.state().actions.slice(before.actions.length);
+  assert.deepEqual(events.map((event) => event.taskId), [...ids].sort());
+  for (const task of f.state().tasks) {
+    const previous = before.tasks.find((entry) => entry.id === task.id)!;
+    if (ids.includes(task.id)) {
+      assert.deepEqual(task, { ...previous, areaId: null, updatedAt: at(100) });
+      const event = events.find((entry) => entry.taskId === task.id)!;
+      assert.equal(event.type, "AREA_CHANGED");
+      assert.deepEqual(event.metadata, {
+        before: { areaId: area.id, area: { id: area.id, name: "Name at deletion" } },
+        after: { areaId: null, area: null },
+      });
+    } else assert.deepEqual(task, previous);
+    assert.deepEqual(calculateTaskSummary(task, f.state().actions.filter((action) => action.taskId === task.id), at(100)), summaries.get(task.id));
+  }
+  assert.deepEqual(f.operations.slice(operationIndex), [
+    `area-lock:${area.id}`, `linked-tasks:${area.id}`,
+    ...[...ids].sort().flatMap((id) => [`task-update:${id}`, `event:${id}:AREA_CHANGED`]),
+    `area-delete:${area.id}`,
+  ]);
+  const dtoAfter = (await f.request("GET", `/${ids[0]}`)).body;
+  assert.deepEqual(dtoAfter, { ...dtoBefore, areaId: null, area: null, updatedAt: at(100).toISOString() });
+  const history = (await f.request("GET", `/${ids[0]}/history`)).body;
+  assert.deepEqual(history.find((entry: TaskAction) => entry.id === creation.id), JSON.parse(JSON.stringify(creation)));
+  assert.equal((await f.areaRequest("DELETE", `/${area.id}`)).status, 404);
+  assert.equal(f.state().actions.length, before.actions.length + ids.length);
+});
+
+test("Area deletion rolls back every task/event and Area on partial journal, task-write or delete failures", async (t) => {
+  for (const failure of ["event-first", "event-middle", "event-last", "task-first", "task-middle", "task-last", "area-delete"] as const) {
+    const f = await fixture(t);
+    const area = await f.createArea();
+    for (let index = 0; index < 3; index++) await f.request("POST", "", { ...input, areaId: area.id });
+    const before = structuredClone(f.state());
+    const position = failure.endsWith("first") ? 0 : failure.endsWith("middle") ? 1 : 2;
+    if (failure.startsWith("event")) f.failEvents(position);
+    else if (failure.startsWith("task")) f.failTaskWrites(position);
+    else f.failAreaDelete();
+    assert.deepEqual(await f.areaRequest("DELETE", `/${area.id}`), {
+      status: 500, body: { error: { message: "Internal server error." } },
+    }, failure);
+    assert.deepEqual(f.state(), before, failure);
+  }
+});
+
+test("Area deletion retries the whole transaction without duplicate events and exhausted retries preserve links", async (t) => {
+  const f = await fixture(t);
+  const area = await f.createArea();
+  for (let index = 0; index < 3; index++) await f.request("POST", "", { ...input, areaId: area.id });
+  const before = structuredClone(f.state());
+  const attempts = f.attempts();
+  f.commitConflicts(3);
+  assert.equal((await f.areaRequest("DELETE", `/${area.id}`)).status, 409);
+  assert.equal(f.attempts() - attempts, 3);
+  assert.deepEqual(f.state(), before);
+  f.commitConflicts(2);
+  assert.equal((await f.areaRequest("DELETE", `/${area.id}`)).status, 204);
+  assert.equal(f.attempts() - attempts, 6);
+  const events = f.state().actions.filter((action) => action.type === "AREA_CHANGED");
+  assert.equal(events.length, 3);
+  assert.equal(new Set(events.map((event) => event.taskId)).size, 3);
+  assert.ok(f.state().tasks.every((task) => task.areaId === null));
+  assert.equal(f.state().areas.length, 0);
+});
+
+test("same-ID assignment, rename and repeat deletion recheck existence after a simulated concurrent deletion", async (t) => {
+  for (const operation of ["same-assignment", "rename", "delete"] as const) {
+    const f = await fixture(t);
+    const area = await f.createArea();
+    const task = (await f.request("POST", "", { ...input, areaId: area.id })).body;
+    f.deleteOnAssignmentConflict(area.id, "P2010");
+    const result = operation === "same-assignment"
+      ? await f.request("PATCH", `/${task.id}`, { areaId: area.id })
+      : await f.areaRequest(operation === "rename" ? "PATCH" : "DELETE", `/${area.id}`, operation === "rename" ? { name: "Rename" } : undefined);
+    assert.deepEqual(result, { status: 404, body: { error: { message: "Area not found." } } });
+    assert.equal(f.state().areas.length, 0);
+    assert.equal(f.state().tasks[0].areaId, null);
+    assert.equal(f.state().actions.filter((action) => action.type === "AREA_CHANGED").length, 1);
+  }
+});
 
 test("fixed-clock Task responses share summary contract and include just-written manual and automatic events", async (t) => {
   const f = await fixture(t);
@@ -253,7 +708,7 @@ test("creation with subtasks returns the complete sorted DTO and only creation e
   const parent = f.state().tasks[0];
   const expectedChildren = JSON.parse(JSON.stringify([...f.state().subtasks].reverse()));
   assert.deepEqual(result.body, {
-    ...JSON.parse(JSON.stringify(parent)), isCompleted: false, subtasks: expectedChildren,
+    ...JSON.parse(JSON.stringify(parent)), area: null, isCompleted: false, subtasks: expectedChildren,
     summary: calculateTaskSummary(parent, f.state().actions, new Date(result.body.summary.asOf)),
   });
   assert.equal(result.body.title, "Update UI");
@@ -271,7 +726,7 @@ test("creation with subtasks returns the complete sorted DTO and only creation e
   const [created, ...children] = f.state().actions;
   assert.deepEqual(f.state().actions.map((action) => action.type), ["CREATED", "SUBTASK_CREATED", "SUBTASK_CREATED"]);
   assert.equal(created.taskId, parent.id);
-  assert.deepEqual(created.metadata, { before: null, after: JSON.parse(JSON.stringify(parent)) });
+  assert.deepEqual(created.metadata, { before: null, after: { ...JSON.parse(JSON.stringify(parent)), area: null } });
   for (const [index, action] of children.entries()) {
     assert.equal(action.taskId, parent.id);
     assert.deepEqual(action.metadata, {
@@ -322,7 +777,7 @@ test("invalid nested creation and duration overflow fail before opening a transa
     assert.equal((await f.request("POST", "", data)).status, 400, JSON.stringify(data));
   }
   assert.equal(f.attempts(), 0);
-  assert.deepEqual(f.state(), { tasks: [], subtasks: [], actions: [] });
+  assert.deepEqual(f.state(), { tasks: [], subtasks: [], actions: [], areas: [] });
   const atLimit = await f.request("POST", "", {
     ...body, subtasks: [{ title: "Almost max", estimatedDurationMinutes: 2_147_483_646 }, { title: "Last", estimatedDurationMinutes: 1 }],
   });
@@ -384,7 +839,7 @@ test("creation requires deadline and duration, validates types and logs normaliz
   const [action] = f.state().actions;
   assert.equal(action.type, "CREATED");
   assert.equal(action.taskId, task.id);
-  assert.deepEqual(action.metadata, { before: null, after: JSON.parse(JSON.stringify(f.state().tasks[0])) });
+  assert.deepEqual(action.metadata, { before: null, after: { ...JSON.parse(JSON.stringify(f.state().tasks[0])), area: null } });
 });
 
 test("creation without plannedAt stores and returns null with MEDIUM priority", async (t) => {
@@ -396,7 +851,7 @@ test("creation without plannedAt stores and returns null with MEDIUM priority", 
   assert.equal(result.body.priority, "MEDIUM");
   assert.equal(f.state().tasks[0].plannedAt, null);
   const action = f.state().actions[0];
-  assert.deepEqual(action.metadata, { before: null, after: JSON.parse(JSON.stringify(f.state().tasks[0])) });
+  assert.deepEqual(action.metadata, { before: null, after: { ...JSON.parse(JSON.stringify(f.state().tasks[0])), area: null } });
 });
 
 test("all priorities create and update with transactional before/after events", async (t) => {

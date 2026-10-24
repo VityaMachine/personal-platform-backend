@@ -62,7 +62,7 @@ test("reopening resumes work and calendar age, recompletion uses the last entry"
 });
 
 test("edits, archive, subtask events and same-status records do not create transitions", () => {
-  const ignored = ["EDITED", "ARCHIVED", "UNARCHIVED", "SUBTASK_STATUS_CHANGED", "SUBTASK_CREATED", "SUBTASK_DELETED", "SUBTASK_EDITED", "DELETED"] as const;
+  const ignored = ["AREA_CHANGED", "EDITED", "ARCHIVED", "UNARCHIVED", "SUBTASK_STATUS_CHANGED", "SUBTASK_CREATED", "SUBTASK_DELETED", "SUBTASK_EDITED", "DELETED"] as const;
   const actions: SummaryAction[] = [created(), ...ignored.map((type, index) => ({
     id: `event-${index}`, type, timestamp: at(index + 1), metadata: { before: { status: "TODO" }, after: { status: "DONE" } },
   })), transition(20, "TODO", "TODO")];

@@ -9,8 +9,15 @@ import {
 import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./tasks.schemas";
 import { createSubtasksService } from "./subtasks.service";
 import { calculateTaskSummary } from "./tasks.summary";
+import { toAreaSnapshot } from "../areas/areas.mapper";
 
 export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
+  async function assignableArea(id: string | null | undefined, tx: TasksTransactionRepository) {
+    if (!id) return null;
+    const area = await tx.findAreaForAssignment(id);
+    if (!area) throw new ApiError(404, "Area not found.");
+    return { id: area.id, name: area.name };
+  }
   async function summarize(tasks: TaskWithSubtasks[], tx: TasksTransactionRepository) {
     const actions = tasks.length ? await tx.findSummaryActions(tasks.map((task) => task.id)) : [];
     const grouped = new Map<string, typeof actions>();
@@ -53,13 +60,14 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
     create(data: CreateTaskInput) {
       const { subtasks = [], ...fields } = data;
       return transaction(async (tx) => {
-        const created = await tx.create({ ...fields, plannedAt: fields.plannedAt ?? null });
-        await tx.createAction(created.id, "CREATED", { before: null, after: created });
+        const area = await assignableArea(fields.areaId, tx);
+        const created = await tx.create({ ...fields, areaId: fields.areaId ?? null, plannedAt: fields.plannedAt ?? null });
+        await tx.createAction(created.id, "CREATED", { before: null, after: { ...created, area: toAreaSnapshot(area) } });
         for (const subtask of subtasks) {
           const child = await tx.createSubtask(created.id, { ...subtask, status: "TODO" });
           await tx.createAction(created.id, "SUBTASK_CREATED", { subtaskId: child.id, before: null, after: child });
         }
-        const task = subtasks.length ? await findTask(created.id, tx) : { ...created, subtasks: [] };
+        const task = subtasks.length ? await findTask(created.id, tx) : { ...created, area, subtasks: [] };
         return (await summarize([task], tx))[0];
       });
     },
@@ -73,6 +81,10 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
       const { archived, isCompleted, ...fields } = input;
       return transaction(async (tx) => {
         const before = await findTask(id, tx);
+        const areaChanged = fields.areaId !== undefined && fields.areaId !== before.areaId;
+        // Even a same-ID write must take the Area lock before updating Task:
+        // otherwise an FK check can reverse the deletion lock order.
+        if (fields.areaId) await assignableArea(fields.areaId, tx);
         if (fields.estimatedDurationMinutes !== undefined && before.subtasks.length) {
           throw new ApiError(409, "Task duration is calculated from its subtasks.");
         }
@@ -84,6 +96,12 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
         }
         if (archived !== undefined) data.archivedAt = archived ? before.archivedAt ?? new Date() : null;
         const updated = await tx.update(id, data);
+        if (areaChanged) {
+          await tx.createAction(id, "AREA_CHANGED", {
+            before: { areaId: before.areaId, area: toAreaSnapshot(before.area) },
+            after: { areaId: updated.areaId, area: toAreaSnapshot(updated.area) },
+          });
+        }
         const editedKeys = ["title", "description", "priority", "plannedAt", "dueAt", "estimatedDurationMinutes", "cancellationNote"] as const;
         const previous: Record<string, unknown> = {};
         const next: Record<string, unknown> = {};
