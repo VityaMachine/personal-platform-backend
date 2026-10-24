@@ -8,8 +8,20 @@ import {
 } from "./tasks.repository";
 import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./tasks.schemas";
 import { createSubtasksService } from "./subtasks.service";
+import { calculateTaskSummary } from "./tasks.summary";
 
-export function createTasksService(repository: TasksRepository) {
+export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
+  async function summarize(tasks: TaskWithSubtasks[], tx: TasksTransactionRepository) {
+    const actions = tasks.length ? await tx.findSummaryActions(tasks.map((task) => task.id)) : [];
+    const grouped = new Map<string, typeof actions>();
+    for (const action of actions) {
+      const entries = grouped.get(action.taskId) ?? [];
+      entries.push(action);
+      grouped.set(action.taskId, entries);
+    }
+    const asOf = now();
+    return tasks.map((task) => ({ ...task, summary: calculateTaskSummary(task, grouped.get(task.id) ?? [], asOf) }));
+  }
   async function findTask(id: string, reader: Pick<TasksRepository, "findFirst"> = repository) {
     const task = await reader.findFirst({ id, deletedAt: null });
     if (!task) throw new ApiError(404, "Task not found.");
@@ -30,12 +42,14 @@ export function createTasksService(repository: TasksRepository) {
   return {
     subtasks: createSubtasksService({ findTask, transaction }),
     list(query: ListTasksInput) {
-      return repository.findMany({
+      return transaction(async (tx) => summarize(await tx.findMany({
         deletedAt: null,
         archivedAt: query.archived === "true" ? { not: null } : null,
-      });
+      }), tx));
     },
-    get: findTask,
+    get(id: string) {
+      return transaction(async (tx) => (await summarize([await findTask(id, tx)], tx))[0]);
+    },
     create(data: CreateTaskInput) {
       const { subtasks = [], ...fields } = data;
       return transaction(async (tx) => {
@@ -45,8 +59,8 @@ export function createTasksService(repository: TasksRepository) {
           const child = await tx.createSubtask(created.id, { ...subtask, status: "TODO" });
           await tx.createAction(created.id, "SUBTASK_CREATED", { subtaskId: child.id, before: null, after: child });
         }
-        if (subtasks.length) return findTask(created.id, tx);
-        return { ...created, subtasks: [] } satisfies TaskWithSubtasks;
+        const task = subtasks.length ? await findTask(created.id, tx) : { ...created, subtasks: [] };
+        return (await summarize([task], tx))[0];
       });
     },
     history(id: string) {
@@ -94,7 +108,7 @@ export function createTasksService(repository: TasksRepository) {
             after: { archivedAt: updated.archivedAt },
           });
         }
-        return updated;
+        return (await summarize([updated], tx))[0];
       });
     },
     remove(id: string) {

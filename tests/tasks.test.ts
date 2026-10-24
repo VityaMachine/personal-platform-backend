@@ -11,6 +11,7 @@ import { errorHandler } from "../src/middleware/error-handler";
 import { createRequestLogger } from "../src/middleware/request-logger";
 import { createLogger } from "../src/lib/logger";
 import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
+import { calculateTaskSummary, type TaskSummary } from "../src/modules/tasks/tasks.summary";
 
 const input = {
   title: "Write the proposal",
@@ -29,7 +30,9 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
   let commitConflicts = 0;
   let subtasksBeforeFailure: number | undefined;
   let attempts = 0;
-  const reads = { tasks: 0, subtasks: 0 };
+  let fixedTime: Date | undefined;
+  const now = () => fixedTime ? new Date(fixedTime) : new Date();
+  const reads = { tasks: 0, subtasks: 0, history: 0 };
   function taskResult(db: typeof state, task: Task, include?: Prisma.TaskInclude) {
     if (!include) return structuredClone(task);
     assert.deepEqual(include, {
@@ -59,26 +62,34 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
           id: randomUUID(), title: "", description: null, status: "TODO", priority: "MEDIUM",
           plannedAt: null, dueAt: null, estimatedDurationMinutes: 1,
           cancellationNote: null, archivedAt: null, deletedAt: null,
-          createdAt: new Date(), updatedAt: new Date(), ...data,
+          createdAt: now(), updatedAt: now(), ...data,
         };
         db.tasks.push(task);
         return structuredClone(task);
       },
       async update({ where, data, include }: { where: { id: string }; data: Partial<Task>; include?: Prisma.TaskInclude }) {
         const task = db.tasks.find((task) => task.id === where.id)!;
-        Object.assign(task, data, { updatedAt: new Date() });
+        Object.assign(task, data, { updatedAt: now() });
         return taskResult(db, task, include);
       },
     },
     taskAction: {
       async create({ data }: { data: Omit<TaskAction, "id" | "timestamp"> }) {
         if (writesBeforeFailure !== undefined && writesBeforeFailure-- <= 0) throw new Error("Simulated event write failure");
-        const action = { id: randomUUID(), timestamp: new Date(), ...data };
+        const action = { id: randomUUID(), timestamp: now(), ...data };
         db.actions.push(action);
         return action;
       },
-      async findMany({ where }: { where: { taskId: string } }) {
-        return structuredClone(db.actions.filter((action) => action.taskId === where.taskId));
+      async findMany({ where, orderBy }: {
+        where: { taskId: string | { in: string[] }; type?: { in: string[] } };
+        orderBy: unknown;
+      }) {
+        reads.history++;
+        assert.deepEqual(orderBy, [{ timestamp: "asc" }, { id: "asc" }]);
+        return structuredClone(db.actions.filter((action) =>
+          (typeof where.taskId === "string" ? action.taskId === where.taskId : where.taskId.in.includes(action.taskId)) &&
+          (!where.type || where.type.in.includes(action.type)))
+          .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime() || a.id.localeCompare(b.id)));
       },
     },
     subtask: {
@@ -125,7 +136,7 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
   const logs: string[] = [];
   app.use(createRequestLogger(createLogger("production", { write(line) { logs.push(line); } })));
   app.use(express.json());
-  app.use("/api/tasks", createTasksRouter(() => client));
+  app.use("/api/tasks", createTasksRouter(() => client, now));
   app.use(errorHandler);
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -139,7 +150,8 @@ async function fixture(t: TestContext, initialSubtaskIds: string[] = []) {
     return { status: response.status, body: response.status === 204 ? null : await response.json() };
   }
   return {
-    request, logs, reads, state: () => state, failEvents: (after = 0) => { writesBeforeFailure = after; },
+    request, logs, reads, state: () => state, setTime: (time: Date) => { fixedTime = time; },
+    failEvents: (after = 0) => { writesBeforeFailure = after; },
     conflicts: (count: number) => { conflicts = count; }, attempts: () => attempts,
     commitConflicts: (count: number) => { commitConflicts = count; },
     failSubtasks: (after = 0) => { subtasksBeforeFailure = after; },
@@ -162,6 +174,55 @@ const initialSubtasks = [
   { title: "  Update task list  ", estimatedDurationMinutes: 40 },
   { title: "Check on mobile", estimatedDurationMinutes: 20 },
 ];
+
+test("fixed-clock Task responses share summary contract and include just-written manual and automatic events", async (t) => {
+  const f = await fixture(t);
+  const at = (seconds: number) => new Date(Date.parse("2026-10-22T00:00:00Z") + seconds * 1000);
+  f.setTime(at(0));
+  const created = await f.request("POST", "", input);
+  const id = created.body.id;
+  const expected = (age: number, working: number, todo: number, completion: number | null = null) => ({
+    asOf: at(age).toISOString(), ageSeconds: age, inProgressSeconds: working,
+    timeToCompletionSeconds: completion,
+    statusDurationsSeconds: { TODO: todo, IN_PROGRESS: working, PAUSED: 0, POSTPONED: 0 },
+    historyIncomplete: false, historyIssues: [],
+  });
+  assert.deepEqual(created.body.summary, expected(0, 0, 0));
+  f.setTime(at(10));
+  const updated = await f.request("PATCH", `/${id}`, { status: "IN_PROGRESS" });
+  assert.deepEqual(updated.body.summary, expected(10, 0, 10));
+  f.setTime(at(30));
+  const edited = await f.request("PATCH", `/${id}`, { title: "Edited", archived: true });
+  const detail = await f.request("GET", `/${id}`);
+  const historyReads = f.reads.history;
+  const list = await f.request("GET", "?archived=true");
+  assert.equal(f.reads.history - historyReads, 1);
+  for (const task of [edited.body, detail.body, list.body[0]]) {
+    assert.deepEqual(task.summary, expected(30, 20, 10));
+    assert.deepEqual(task.subtasks, []);
+    assert.equal(task.isCompleted, false);
+    assert.equal(task.estimatedDurationMinutes, 45);
+  }
+  f.setTime(at(40));
+  const done = await f.request("PATCH", `/${id}`, { status: "DONE", archived: false });
+  assert.deepEqual(done.body.summary, expected(40, 30, 10, 40));
+  f.setTime(at(60));
+  const child = await f.createSubtask(id, { status: "IN_PROGRESS" });
+  f.setTime(at(80));
+  assert.deepEqual((await f.request("GET", `/${id}`)).body.summary, expected(80, 50, 10));
+  await f.request("PATCH", `/${id}/subtasks/${child.id}`, { status: "DONE" });
+  f.setTime(at(100));
+  const completed = (await f.request("GET", `/${id}`)).body.summary;
+  assert.deepEqual(completed, { ...expected(80, 50, 10, 80), asOf: at(100).toISOString() });
+  // A missing event must be visible through the public DTO; reads do not repair history.
+  f.state().actions.splice(0, 1);
+  const before = structuredClone(f.state());
+  const incomplete = (await f.request("GET", `/${id}`)).body.summary;
+  assert.equal(incomplete.historyIncomplete, true);
+  assert.equal(incomplete.inProgressSeconds, null);
+  assert.equal(incomplete.ageSeconds, null);
+  assert.deepEqual(f.state(), before);
+});
 
 test("creation with omitted or empty subtasks preserves the original contract", async (t) => {
   const f = await fixture(t);
@@ -193,6 +254,7 @@ test("creation with subtasks returns the complete sorted DTO and only creation e
   const expectedChildren = JSON.parse(JSON.stringify([...f.state().subtasks].reverse()));
   assert.deepEqual(result.body, {
     ...JSON.parse(JSON.stringify(parent)), isCompleted: false, subtasks: expectedChildren,
+    summary: calculateTaskSummary(parent, f.state().actions, new Date(result.body.summary.asOf)),
   });
   assert.equal(result.body.title, "Update UI");
   assert.equal(result.body.estimatedDurationMinutes, 60);
@@ -216,7 +278,8 @@ test("creation with subtasks returns the complete sorted DTO and only creation e
       subtaskId: ids[index], before: null, after: JSON.parse(JSON.stringify(f.state().subtasks[index])),
     });
   }
-  assert.deepEqual((await f.request("GET", `/${parent.id}`)).body, result.body);
+  const detail = (await f.request("GET", `/${parent.id}`)).body;
+  assert.deepEqual({ ...detail, summary: result.body.summary }, result.body);
   assert.equal((await f.request("GET", `/${parent.id}/subtasks`)).status, 200);
   assert.equal((await f.request("PATCH", `/${parent.id}`, { estimatedDurationMinutes: 60 })).status, 409);
   await f.createSubtask(parent.id);
@@ -565,6 +628,8 @@ test("Task responses embed complete active subtask DTOs in stable order without 
   assert.deepEqual(list.body.find((task: Task) => task.id === other.id).subtasks, [otherChild]);
   assert.equal(f.reads.tasks - beforeReads.tasks, 1);
   assert.equal(f.reads.subtasks - beforeReads.subtasks, 0);
+  assert.equal(f.reads.history - beforeReads.history, 1);
+  assert.equal(new Set(list.body.map((task: { summary: TaskSummary }) => task.summary.asOf)).size, 1);
   assert.deepEqual((await f.request("GET", `/${parent.id}`)).body.subtasks, expected);
   const patched = await f.request("PATCH", `/${parent.id}`, { title: "Edited", archived: true });
   assert.equal(patched.status, 200);

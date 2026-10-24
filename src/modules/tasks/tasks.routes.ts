@@ -43,9 +43,9 @@ const validateSubtaskUpdate: RequestHandler = (request, response, next) => {
   next();
 };
 
-export function createTasksRouter(client?: () => PrismaClient) {
+export function createTasksRouter(client?: () => PrismaClient, now?: () => Date) {
   const router = Router();
-  const service = createTasksService(createTasksRepository(client));
+  const service = createTasksService(createTasksRepository(client), now);
   const controller = createTasksController(service);
   const subtasks = createSubtasksController(service.subtasks);
 

@@ -34,6 +34,13 @@ function createTaskQueries(db: Prisma.TransactionClient) {
         orderBy: [{ timestamp: "asc" }, { id: "asc" }],
       });
     },
+    findSummaryActions(taskIds: string[]) {
+      return db.taskAction.findMany({
+        where: { taskId: { in: taskIds }, type: { in: ["CREATED", "STATUS_CHANGED"] } },
+        orderBy: [{ timestamp: "asc" }, { id: "asc" }],
+        select: { id: true, taskId: true, type: true, timestamp: true, metadata: true },
+      });
+    },
     findSubtasks(taskId: string) {
       return db.subtask.findMany({
         where: { taskId, deletedAt: null },
