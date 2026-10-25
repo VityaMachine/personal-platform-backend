@@ -12,6 +12,7 @@ import { calculateTaskSummary } from "./tasks.summary";
 import { toAreaSnapshot } from "../areas/areas.mapper";
 import { createTaskWithSubtasks } from "./tasks.creation";
 import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext } from "./tasks.today";
+import { verifiedTaskCompletion } from "./tasks.completion";
 
 export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
   async function assignableArea(id: string | null | undefined, tx: TasksTransactionRepository) {
@@ -34,10 +35,14 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
     // One instant after the successful commit, also when the transaction needed retries.
     // Summary and calendar selection have independent rules over the same consistent snapshot.
     const asOf = now();
-    return snapshot.tasks.map((task) => ({ ...task,
-      summary: calculateTaskSummary(task, snapshot.grouped.get(task.id) ?? [], asOf),
-      isToday: isTaskToday(task, context, asOf),
-    }));
+    return snapshot.tasks.map((task) => {
+      const actions = snapshot.grouped.get(task.id) ?? [];
+      const completedAt = task.status === "DONE" ? verifiedTaskCompletion(task, actions, asOf).completedAt?.toISOString() ?? null : null;
+      return { ...task, completedAt,
+        summary: calculateTaskSummary(task, actions, asOf),
+        isToday: isTaskToday({ ...task, completedAt }, context, asOf),
+      };
+    });
   }
   async function findTask(id: string, reader: Pick<TasksRepository, "findFirst"> = repository) {
     const task = await reader.findFirst({ id, deletedAt: null });

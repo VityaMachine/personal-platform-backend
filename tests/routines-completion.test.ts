@@ -38,6 +38,7 @@ test("actual DONE determines local next date; edits and archive do not change ba
   assert.equal((await f.request("PATCH", `/${first.taskId}`, { status: "DONE" })).status, 200);
   f.setTime(new Date("2026-10-28T12:00:00Z"));
   await f.request("PATCH", `/${first.taskId}`, { title: "Edited after DONE", archived: true });
+  assert.equal((await f.request("GET", `/${first.taskId}`)).body.completedAt, "2026-10-26T23:30:00.000Z");
   const second = await f.routineRequest("POST", `/${r.id}/generate`, { from: "2026-10-29", to: "2026-10-29" });
   assert.equal(second.status, 200); assert.equal(second.body.createdCount, 1);
   const occurrence = f.state().occurrences[1];

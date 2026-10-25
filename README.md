@@ -1246,7 +1246,8 @@ JSON у stdout, без завантаження `pino-pretty`; інші знач
 ## «Сьогодні»: isToday і view=today
 
 Усі повні Task DTO у GET списку, GET деталей, POST та PATCH містять boolean
-`isToday`. Це обчислюване поле, без колонки БД. area, subtasks, routineOccurrence,
+`isToday` і `completedAt: ISO string | null`. Обидва поля обчислювані, без колонок БД.
+area, subtasks, routineOccurrence,
 summary, isCompleted та всі чинні поля збережені. Підзадачі окремого isToday не мають.
 
 На цих чотирьох маршрутах підтримуються query-параметри:
@@ -1280,11 +1281,35 @@ GET деталей, POST та PATCH приймають три параметри
 
 ### Правила «Сьогодні»
 
-DONE, CANCELED, archivedAt != null або deletedAt != null завжди дають false.
+CANCELED, archivedAt != null або deletedAt != null завжди дають false.
 М'яко видалені Task, як раніше, недоступні через API. PAUSED та POSTPONED самі
 по собі не виключають задачу; застосовуються її поточні збережені дати.
 
-Для звичайної Task plannedAt і dueAt незалежно переводяться в локальні дати
+Для DONE isToday=true, якщо **останній достовірний реальний перехід у DONE**
+відбувся сьогодні в timezone **запиту**. plannedAt, dueAt, вікно та timezone
+RoutineOccurrence, overdueMode й overdueDays на цей відбір не впливають.
+Завершення в попередній день не входить, навіть якщо дедлайн сьогодні.
+
+completedAt — timestamp цього поточного завершення, ISO UTC з Z; timezone запиту
+змінює лише відбір, не сам timestamp. Для не-DONE completedAt=null. Для архівованої
+DONE момент завершення може бути відомий, але isToday усе одно false.
+Використовується наявний `verifiedTaskCompletion` з TaskAction, той самий helper,
+що й у AFTER_COMPLETION: окремого аналізу історії немає. updatedAt і summary.asOf
+не є джерелами завершення. Редагування назви/сфери, архівування та повторний PATCH
+з незміненим DONE не пересувають completedAt. Автоматичний DONE від підзадач
+враховується так само, як ручний. Після reopen completedAt=null і знову працюють
+правила невиконаних задач; повторний реальний DONE встановлює новий completedAt.
+
+Якщо helper не може достовірно визначити завершення (пропуски/суперечності,
+неоднозначні переходи з однаковим timestamp або бюджет історії), для DONE
+повертаються completedAt=null та isToday=false, без вигаданої дати. Наявні
+summary.historyIncomplete/historyIssues збережені за чинними правилами summary;
+їх не переписує розрахунок completedAt. Історія CREATED/STATUS_CHANGED читається
+тим самим одним пакетним запитом для summary, без нового запиту на кожну Task.
+У мутаціях використовуються також щойно записані події. Один now на відповідь,
+семантика summary та генерації AFTER_COMPLETION не змінені.
+
+Для **невиконаної** звичайної Task plannedAt і dueAt незалежно переводяться в локальні дати
 timezone **запиту**. Достатньо однієї відповідності:
 
 - none — дата дорівнює сьогодні;
@@ -1296,7 +1321,7 @@ timezone **запиту**. Достатньо однієї відповідно�
 Конкретна година сьогодні не обмежує календарний відбір: дата сьогодні входить
 навіть тоді, коли її timestamp пізніший за поточну годину.
 
-Для збереженого RoutineOccurrence локальні startDate/endDate залишаються в
+Для невиконаної Task зі збереженим RoutineOccurrence локальні startDate/endDate залишаються в
 **timezone occurrence**. Сьогодні визначається з того самого request instant у
 цьому timezone; межі не переводяться в UTC або timezone запиту. Без plannedAt:
 
@@ -1321,7 +1346,8 @@ plannedAt відсутній: isToday = occurrence-відбір OR dueAt-від�
 майбутнє**. Дати plannedAt/dueAt використовують timezone запиту, а вікно — свій.
 Пауза або видалення шаблону Routine не приховує створену Task; поточний шаблон
 для цього не завантажується. GET нічого не генерує та не записує. Цей відбір
-не залежить від віку Task, часу в статусах або достовірності summary.
+не залежить від віку Task, часу в статусах або достовірності summary. У DONE
+використовується лише перевірене завершення та timezone запиту, як описано вище.
 
 ### Postman: звичайна Task
 
@@ -1390,6 +1416,46 @@ PATCH {{baseUrl}}/api/tasks/{{massageTaskId}}?timezone=Europe%2FKyiv&overdueMode
 
 Приклади навмисно не додають now/date до URL. Перевірка
 `GET {{baseUrl}}/api/tasks?archived=true&view=today` → `400`.
+
+### Postman: задача, виконана сьогодні
+
+Створіть неархівовану TODO:
+
+```http
+POST {{baseUrl}}/api/tasks?timezone=Europe%2FKyiv&overdueMode=none
+```
+
+```json
+{
+  "title": "Перевірка завершення сьогодні",
+  "dueAt": "2027-01-01T12:00:00Z",
+  "estimatedDurationMinutes": 5
+}
+```
+
+Збережіть id як taskId. POST поверне completedAt=null. Виконайте реальний перехід:
+
+```http
+PATCH {{baseUrl}}/api/tasks/{{taskId}}?timezone=Europe%2FKyiv&overdueMode=none
+```
+
+```json
+{ "status": "DONE" }
+```
+
+У відповіді completedAt містить фактичний timestamp переходу, isToday=true,
+незалежно від дедлайну. Той самий контекст використовується в читанні:
+
+```http
+GET {{baseUrl}}/api/tasks/{{taskId}}?timezone=Europe%2FKyiv&overdueMode=none
+GET {{baseUrl}}/api/tasks?view=today&timezone=Europe%2FKyiv&overdueMode=none
+```
+
+Повторіть PATCH `{ "status": "DONE" }` — completedAt не зміниться. Після переходу
+через північ у Europe/Kyiv задача перестане входити в today без зміни completedAt.
+PATCH `{ "status": "TODO" }` поверне completedAt=null і застосує звичайні правила
+дат; новий PATCH DONE зафіксує нове реальне завершення. completedAt у body не
+передається: поле read-only, спроба запису → `400`. GET нічого не записує й не генерує.
 
 ## Часовий підсумок Task
 

@@ -5,7 +5,7 @@ import { fixture } from "./helpers/api-fixture";
 
 const now = new Date("2026-10-25T12:00:00Z");
 const task = (patch: Partial<TaskTodayInput> = {}): TaskTodayInput => ({
-  status: "TODO", archivedAt: null, deletedAt: null, plannedAt: null, dueAt: null, routineOccurrence: null, ...patch,
+  status: "TODO", archivedAt: null, deletedAt: null, plannedAt: null, dueAt: null, routineOccurrence: null, completedAt: null, ...patch,
 });
 const context = (patch: Partial<TaskTodayContext> = {}): TaskTodayContext => ({ ...DEFAULT_TODAY_CONTEXT, ...patch });
 const date = (day: string) => new Date(`${day}T12:00:00Z`);
@@ -190,5 +190,139 @@ test("saved Massage and monthly windows survive Routine pause/delete; personal p
   for (const [day, expected] of [["2026-11-14", false], ["2026-11-15", true], ["2026-11-23", true], ["2026-11-24", false]] as const) {
     f.setTime(date(day));
     assert.equal((await f.request("GET", `/${monthlyId}?overdueMode=none`)).body.isToday, expected);
+  }
+});
+
+test("verified DONE today ignores task dates and overdue mode; yesterday DONE ignores today's deadline and occurrence", () => {
+  for (const overdueMode of ["none", "limited", "all"] as const) {
+    for (const dates of [{ plannedAt: null, dueAt: null, routineOccurrence: null },
+      { plannedAt: date("2027-01-01"), dueAt: date("2027-01-02"), routineOccurrence: { startDate: "2027-01-01", endDate: "2027-01-03", timezone: "Pacific/Auckland" } },
+      { plannedAt: date("2026-10-25"), dueAt: date("2026-10-25"), routineOccurrence: { startDate: "2026-10-15", endDate: "2026-10-30", timezone: "Europe/Kyiv" } }]) {
+      const value = task({ ...dates, status: "DONE", completedAt: "2026-10-25T10:00:00.000Z" });
+      assert.equal(isTaskToday(value, context({ overdueMode }), now), true);
+      assert.equal(isTaskToday({ ...value, completedAt: "2026-10-24T10:00:00.000Z" }, context({ overdueMode }), now), false);
+      assert.equal(isTaskToday({ ...value, completedAt: null }, context({ overdueMode }), now), false);
+      assert.equal(isTaskToday({ ...value, archivedAt: now }, context({ overdueMode }), now), false);
+      assert.equal(isTaskToday({ ...value, deletedAt: now }, context({ overdueMode }), now), false);
+      assert.equal(isTaskToday({ ...value, status: "CANCELED" }, context({ overdueMode }), now), false);
+    }
+  }
+});
+
+test("DONE uses the request timezone at midnight, independently from the occurrence timezone", async (t) => {
+  const completedAt = "2026-10-24T22:30:00.000Z";
+  const asOf = new Date("2026-10-25T00:30:00Z");
+  const value = task({ status: "DONE", completedAt, routineOccurrence: { startDate: "2026-10-25", endDate: "2026-10-25", timezone: "Europe/Kyiv" } });
+  assert.equal(isTaskToday(value, context({ timezone: "UTC" }), asOf), false);
+  assert.equal(isTaskToday(value, context({ timezone: "Europe/Kyiv" }), asOf), true);
+  assert.equal(isTaskToday(value, context({ timezone: "America/Los_Angeles" }), asOf), true);
+  assert.equal(isTaskToday(value, context({ timezone: "America/Los_Angeles" }), new Date("2026-10-25T07:00:00Z")), false);
+  const f = await fixture(t); f.setTime(date("2026-10-20"));
+  const created = (await f.request("POST", "", { title: "Midnight", dueAt: "2026-10-25T12:00:00Z", estimatedDurationMinutes: 5 })).body;
+  f.setTime(new Date(completedAt)); await f.request("PATCH", `/${created.id}`, { status: "DONE" });
+  f.setTime(asOf);
+  const utc = (await f.request("GET", `/${created.id}`)).body;
+  const kyiv = (await f.request("GET", `/${created.id}?timezone=Europe%2FKyiv`)).body;
+  assert.equal(utc.isToday, false); assert.equal(kyiv.isToday, true);
+  assert.equal(utc.completedAt, completedAt); assert.equal(kyiv.completedAt, completedAt);
+  assert.deepEqual(utc.summary, kyiv.summary);
+});
+
+test("just-written DONE is consistent in PATCH/detail/list, with one clock and one batched history query", async (t) => {
+  const f = await fixture(t); f.setTime(date("2026-10-20"));
+  const created = (await f.request("POST", "?timezone=Europe%2FKyiv", {
+    title: "Not planned today", dueAt: "2027-01-01T12:00:00Z", plannedAt: "2027-01-02T12:00:00Z", estimatedDurationMinutes: 5,
+  })).body;
+  assert.equal(created.completedAt, null); assert.equal(created.isToday, false);
+  f.setTime(now); f.commitConflicts(2);
+  const clock = f.taskClockCalls(), history = f.reads.history;
+  const changed = await f.request("PATCH", `/${created.id}?timezone=Europe%2FKyiv&overdueMode=none`, { status: "DONE" });
+  assert.equal(changed.status, 200); assert.equal(changed.body.isCompleted, true); assert.equal(changed.body.isToday, true);
+  assert.equal(changed.body.completedAt, now.toISOString()); assert.equal(changed.body.summary.historyIncomplete, false);
+  assert.equal(f.taskClockCalls() - clock, 1); assert.equal(f.reads.history - history, 3, "one history query per transaction attempt");
+  const detail = (await f.request("GET", `/${created.id}?timezone=Europe%2FKyiv&overdueMode=none`)).body;
+  assert.deepEqual(detail, changed.body);
+  for (let index = 0; index < 3; index++) {
+    const taskId = (await f.request("POST", "", { title: `Other ${index}`, dueAt: "2027-01-01T12:00:00Z", estimatedDurationMinutes: 5 })).body.id;
+    await f.request("PATCH", `/${taskId}`, { status: "DONE" });
+  }
+  const before = structuredClone(f.state()), reads = { ...f.reads }, clocks = f.taskClockCalls();
+  const list = (await f.request("GET", "?view=today&timezone=Europe%2FKyiv&overdueMode=none")).body;
+  assert.equal(list.length, 4); assert.deepEqual(list.find((entry: { id: string }) => entry.id === created.id), detail);
+  assert.ok(list.every((entry: { completedAt: string; isToday: boolean }) => entry.completedAt === now.toISOString() && entry.isToday));
+  assert.equal(f.reads.tasks - reads.tasks, 1); assert.equal(f.reads.history - reads.history, 1); assert.equal(f.taskClockCalls() - clocks, 1);
+  assert.deepEqual(f.state(), before); assert.equal("completedAt" in f.state().tasks[0], false);
+  assert.equal((await f.request("PATCH", `/${created.id}`, { completedAt: now.toISOString() })).status, 400);
+});
+
+test("edits and unchanged DONE do not refresh completion; reopening and completing again do", async (t) => {
+  const f = await fixture(t); f.setTime(date("2026-10-20"));
+  const id = (await f.request("POST", "", { title: "Lifecycle", dueAt: "2026-10-25T12:00:00Z", estimatedDurationMinutes: 5 })).body.id;
+  f.setTime(date("2026-10-24"));
+  const done = (await f.request("PATCH", `/${id}`, { status: "DONE" })).body;
+  assert.equal(done.completedAt, "2026-10-24T12:00:00.000Z");
+  f.setTime(now);
+  const edited = (await f.request("PATCH", `/${id}`, { title: "Edited today" })).body;
+  assert.equal(edited.isToday, false); assert.equal(edited.completedAt, done.completedAt);
+  assert.notEqual(edited.updatedAt, done.updatedAt);
+  const transitions = f.state().actions.filter((action) => action.type === "STATUS_CHANGED").length;
+  const unchanged = (await f.request("PATCH", `/${id}`, { status: "DONE" })).body;
+  assert.equal(unchanged.isToday, false); assert.equal(unchanged.completedAt, done.completedAt);
+  assert.equal(unchanged.summary.timeToCompletionSeconds, done.summary.timeToCompletionSeconds);
+  assert.equal(f.state().actions.filter((action) => action.type === "STATUS_CHANGED").length, transitions);
+  const reopened = (await f.request("PATCH", `/${id}`, { status: "TODO" })).body;
+  assert.equal(reopened.completedAt, null); assert.equal(reopened.isToday, true, "ordinary deadline rules resume");
+  f.setTime(new Date("2026-10-25T12:00:01Z"));
+  const recompleted = (await f.request("PATCH", `/${id}`, { status: "DONE" })).body;
+  assert.equal(recompleted.completedAt, "2026-10-25T12:00:01.000Z"); assert.equal(recompleted.isToday, true);
+  const archived = (await f.request("PATCH", `/${id}`, { archived: true })).body;
+  assert.equal(archived.completedAt, recompleted.completedAt); assert.equal(archived.isToday, false);
+  assert.equal((await f.request("GET", "?archived=true")).body[0].completedAt, recompleted.completedAt);
+  assert.equal((await f.request("PATCH", `/${id}`, { archived: false })).body.isToday, true);
+  f.setTime(new Date("2026-10-25T12:00:02Z"));
+  const canceled = (await f.request("PATCH", `/${id}`, { status: "CANCELED", cancellationNote: "Canceled" })).body;
+  assert.equal(canceled.completedAt, null); assert.equal(canceled.isToday, false);
+  await f.request("DELETE", `/${id}`);
+  assert.equal((await f.request("GET", `/${id}`)).status, 404);
+  assert.deepEqual((await f.request("GET", "?view=today")).body, []);
+});
+
+test("automatic Subtask DONE includes a future Routine occurrence today using the parent's real transition", async (t) => {
+  const f = await fixture(t); f.setTime(date("2026-10-20"));
+  const routine = (await f.routineRequest("POST", "", { title: "Future execution", timezone: "Europe/Kyiv", startDate: "2026-11-01",
+    subtasks: [{ title: "Finish", estimatedDurationMinutes: 10 }], schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 1 } } })).body;
+  const id = (await f.routineRequest("POST", `/${routine.id}/generate`, { from: "2026-11-01", to: "2026-11-01" })).body.created[0].taskId;
+  const parent = (await f.request("GET", `/${id}`)).body;
+  assert.equal(parent.completedAt, null); assert.equal(parent.isToday, false);
+  f.setTime(now);
+  assert.equal((await f.request("PATCH", `/${id}/subtasks/${parent.subtasks[0].id}`, { status: "DONE" })).status, 200);
+  const completed = (await f.request("GET", `/${id}?overdueMode=none`)).body;
+  assert.equal(completed.completedAt, now.toISOString()); assert.equal(completed.isToday, true);
+  assert.equal(completed.summary.historyIncomplete, false); assert.deepEqual(completed.routineOccurrence, parent.routineOccurrence);
+  const action = f.state().actions.find((entry) => entry.taskId === id && entry.type === "STATUS_CHANGED")!;
+  assert.equal(completed.completedAt, action.timestamp.toISOString());
+  assert.equal((action.metadata as { subtaskId: string }).subtaskId, parent.subtasks[0].id);
+});
+
+test("untrustworthy DONE has null completedAt and isToday=false without hiding existing summary diagnostics", async (t) => {
+  for (const mode of ["missing_creation", "missing_transition", "broken_chain", "malformed", "tied", "budget"] as const) {
+    const f = await fixture(t); f.setTime(date("2026-10-20"));
+    const id = (await f.request("POST", "", { title: mode, dueAt: now.toISOString(), estimatedDurationMinutes: 5 })).body.id;
+    f.setTime(now); await f.request("PATCH", `/${id}`, { status: "DONE" });
+    if (mode === "missing_creation") f.state().actions.splice(0, 1);
+    if (mode === "missing_transition") f.state().actions.splice(1, 1);
+    if (mode === "broken_chain") (f.state().actions[1].metadata as { before: { status: string } }).before.status = "IN_PROGRESS";
+    if (mode === "malformed") f.state().actions[1].metadata = { before: {}, after: {} };
+    if (mode === "tied") {
+      await f.request("PATCH", `/${id}`, { status: "TODO" });
+      await f.request("PATCH", `/${id}`, { status: "DONE" });
+    }
+    if (mode === "budget") f.state().actions.push(...Array.from({ length: 10000 }, (_, index) => ({ ...f.state().actions[1], id: `budget-${index}` })));
+    const before = structuredClone(f.state());
+    const result = (await f.request("GET", `/${id}?overdueMode=all`)).body;
+    assert.equal(result.completedAt, null, mode); assert.equal(result.isToday, false, mode);
+    if (mode !== "tied") assert.equal(result.summary.historyIncomplete, true, mode);
+    assert.deepEqual((await f.request("GET", "?view=today&overdueMode=all")).body, [], mode);
+    assert.deepEqual(f.state(), before, mode);
   }
 });

@@ -457,7 +457,7 @@ test("creation with subtasks returns the complete sorted DTO and only creation e
   const { routineOccurrenceId: _occurrenceId, ...parentDto } = JSON.parse(JSON.stringify(parent));
   const expectedChildren = JSON.parse(JSON.stringify([...f.state().subtasks].reverse()));
   assert.deepEqual(result.body, {
-    ...parentDto, routineOccurrence: null, area: null, isCompleted: false, isToday: true, subtasks: expectedChildren,
+    ...parentDto, routineOccurrence: null, area: null, isCompleted: false, isToday: true, completedAt: null, subtasks: expectedChildren,
     summary: calculateTaskSummary(parent, f.state().actions, new Date(result.body.summary.asOf)),
   });
   assert.equal(result.body.title, "Update UI");
