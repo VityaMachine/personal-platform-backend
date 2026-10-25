@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient, type TaskActionType } from "../../generated/prisma/client";
 import { getPrisma } from "../../lib/prisma";
-import { lockArea } from "../areas/areas.repository";
+import { lockArea } from "../../lib/area-lock";
 
 const taskInclude = {
   area: { select: { id: true, name: true } },

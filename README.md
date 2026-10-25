@@ -464,6 +464,266 @@ nullable `Task.areaId`, FK з `ON DELETE RESTRICT`, індекс `Task_areaId_id
 Перевірте також випадковий валідний UUID сфери → `404`, неправильний UUID,
 порожню назву чи невідоме поле → `400`.
 
+## Routines — шаблони повторюваних задач
+
+**Збереження Routine поки не створює жодного Task.** Генерації виконань, cron,
+`isToday`, розрахунку наступного виконання та frontend у цьому кроці немає.
+
+| Метод і маршрут | Результат |
+| --- | --- |
+| `GET /api/routines` | `200`, усі невидалені Routine, включно з paused |
+| `GET /api/routines/:id` | `200`, повний Routine DTO |
+| `POST /api/routines` | `201`, повний Routine DTO |
+| `PATCH /api/routines/:id` | `200`, повний Routine DTO |
+| `DELETE /api/routines/:id` | `204`, м'яке видалення без body |
+| `GET /api/routines/:id/history` | `200`, окремий журнал RoutineAction |
+
+Список: `createdAt DESC`, потім `id ASC`. Query-параметрів наразі немає.
+Невідомі поля й порожній PATCH відхиляються. Невалідні ID/body/query — `400`,
+відсутня/видалена Routine або сфера при призначенні — `404`; вичерпані повтори
+конфлікту транзакції — `409`. Формат помилок і request logging спільні з іншими
+модулями. Видалені Routine та їхня історія недоступні через API; відновлення немає.
+
+### Input і DTO
+
+POST приймає такі поля; PATCH — лише передані поля з цього набору та `paused`:
+
+| Поле | Контракт |
+| --- | --- |
+| `title` | обов'язковий у POST, trim, 1–160 символів, як у Task |
+| `description` | рядок або `null`; default `null`, як у Task |
+| `priority` | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; default `MEDIUM` |
+| `areaId` | UUID або `null`; default `null`; лише наявна Area |
+| `estimatedDurationMinutes` | додатне ціле до `2147483647`; обов'язкове без підзадач у POST |
+| `subtasks` | default `[]`; впорядкований масив `{ title, estimatedDurationMinutes }` |
+| `timezone` | обов'язковий IANA identifier, наприклад `Europe/Kyiv` |
+| `startDate` | обов'язкова локальна дата `YYYY-MM-DD`, роки 0001–9999 |
+| `schedule` | обов'язковий перевірений JSON версії 1, описаний нижче |
+| `endCondition` | default `{ "type": "NEVER" }` |
+| `paused` | лише PATCH, boolean; керує серверним `pausedAt` |
+
+`schedule`, `endCondition` і `subtasks` при передачі замінюються цілком.
+PATCH перевіряє весь результуючий стан: наприклад, новий `startDate` не може
+стати пізнішим за збережену кінцеву дату. `null` очищає лише nullable-поля;
+пропущені поля зберігаються. Без реальної зміни немає запису чи нової події.
+
+За наявності підзадач тривалість дорівнює їхній сумі, навіть якщо передано іншу
+додатну оцінку батька. Переповнення перевіряється до записів. Після PATCH
+`{ "subtasks": [] }` зберігається остання тривалість, яку можна одразу замінити
+переданим `estimatedDurationMinutes`. Порядок масиву визначає `position` від 0.
+Змінений масив замінює всі шаблони й отримує нові UUID; однаковий масив зберігає ID.
+Статусів, `cancellationNote`, `plannedAt`, `dueAt` у шаблонів підзадач немає.
+
+Повний Routine DTO містить усі збережені поля:
+`id`, `title`, `description`, `priority`, `areaId`, `area: { id, name } | null`,
+`estimatedDurationMinutes`, `subtasks`, `timezone`, `startDate`, `schedule`,
+`endCondition`, `pausedAt`, `deletedAt`, `createdAt`, `updatedAt`.
+Підзадача DTO: `{ id, routineId, title, estimatedDurationMinutes, position }`.
+Часові мітки — ISO 8601; `pausedAt` і `deletedAt` — nullable. `startDate` завжди
+залишається рядком локальної дати. У Routine немає `status`, `isCompleted` чи Task summary.
+
+### Розклад версії 1
+
+Зовнішня форма: `{ "version": 1, "recurrence": { ... }, "localTime": null }`.
+`localTime` — необов'язковий `HH:mm` (00:00–23:59) або `null`, default `null`.
+Без часу це календарна дата/вікно, а не UTC-північ. Для вікна час сам по собі
+не обирає конкретний день його виконання.
+
+`recurrence` — discriminated union за `type`:
+
+| `type` | Решта полів |
+| --- | --- |
+| `DAILY` | `intervalDays`: кожні N календарних днів від `startDate` |
+| `WEEKLY` | `intervalWeeks`, `selection` одного з двох weekly-варіантів нижче |
+| `MONTHLY` | `intervalMonths`, `selection` одного з трьох monthly-варіантів нижче |
+| `AFTER_COMPLETION` | `intervalDays`: N календарних днів після фактичного завершення попереднього виконання |
+
+Усі інтервали — додатні цілі до `2147483647`. Для `AFTER_COMPLETION` перше
+виконання прив'язане до `startDate`; підтримано один день, без багатоденного
+вікна. Наступна дата після DONE ще не розраховується.
+
+Weekly selection:
+
+- `{ "type": "DAYS", "weekdays": [1, 4] }` — **два** виконання: понеділок і четвер.
+  Номери ISO: понеділок 1 … неділя 7, без дублікатів; DTO сортує їх за зростанням.
+- `{ "type": "WINDOW", "startWeekday": 6, "endWeekday": 7 }` — **одне** виконання
+  з вікном субота–неділя. `startWeekday <= endWeekday`; вікно не переходить через
+  межу тижня. Початок тижня — понеділок; інтервали відраховуються від тижня,
+  який містить `startDate`, із подальшим обрізанням межами Routine.
+
+Monthly selection:
+
+- `{ "type": "DAY", "day": 31, "shortMonthPolicy": "SKIP" }`;
+- `{ "type": "WINDOW", "startDay": 15, "endDay": 23, "shortMonthPolicy": "CLAMP" }`;
+- `{ "type": "LAST_DAY" }` — останній календарний день місяця.
+
+Дні — 1–31; вікно лежить в одному місяці, `startDay <= endDay`. Місячні інтервали
+відраховуються від місяця `startDate`. Для DAY і WINDOW політика обов'язкова:
+`SKIP` пропускає весь період, якщо хоча б одна необхідна межа відсутня;
+`CLAMP` обмежує кожну межу останнім днем місяця. Наприклад, 30–31 у лютому
+2026 при `SKIP` не дає вікна, при `CLAMP` дає 28–28. Вікно 15–23 завжди вміщується
+в місяць, але політика все одно задається явно. Для LAST_DAY вона не потрібна.
+
+### Загальний період дії й точність
+
+`endCondition` — окремий union:
+
+- `{ "type": "NEVER" }` — безстроково;
+- `{ "type": "UNTIL_DATE", "date": "2026-11-07" }` — до локальної дати включно,
+  не раніше `startDate`;
+- `{ "type": "COUNT", "count": 7 }` — після N **запланованих виконань**.
+
+COUNT означає виконання розкладу, а не кількість DONE. Пропущене користувачем
+виконання рахуватиметься, періоди, пропущені через паузу Routine, — ні.
+Межі вікна обрізаються `startDate` і кінцевою датою включно; порожній перетин
+не утворює виконання. SKIP, який не дає жодного вікна, не утворює виконання.
+У цьому кроці збережено умову COUNT і події пауз/відновлення, але лічильник
+виконань ще не ведеться.
+
+Усі календарні правила належать timezone Routine. `startDate` зберігається
+окремим рядком локальної дати, а розклад і завершення — як перевірені JSON;
+дані не конвертуються наперед у UTC timestamps. Календарні дні не означають
+`N × 24 години`. **DST, вибір моменту в неоднозначний/відсутній локальний час,
+генерація конкретних виконань і Tasks залишені наступному кроку.**
+Чисті helpers зараз перевіряють/нормалізують лише передане вікно, включно з
+короткими місяцями й перетином меж; вони не перебирають майбутні повторення.
+Валідація IANA identifier використовує timezone database ICU встановленого Node.js.
+
+### Точні приклади POST для Postman
+
+Для всіх прикладів: `POST {{baseUrl}}/api/routines`, raw JSON,
+`Content-Type: application/json`, `baseUrl = http://localhost:4000`.
+
+Масаж через день протягом двох тижнів (25 жовтня — 7 листопада включно):
+
+```json
+{
+  "title": "Масаж",
+  "estimatedDurationMinutes": 30,
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-10-25",
+  "schedule": {
+    "version": 1,
+    "recurrence": { "type": "DAILY", "intervalDays": 2 },
+    "localTime": "18:00"
+  },
+  "endCondition": { "type": "UNTIL_DATE", "date": "2026-11-07" }
+}
+```
+
+Щомісячне вікно 15–23, без конкретного часу:
+
+```json
+{
+  "title": "Щомісячний огляд",
+  "estimatedDurationMinutes": 45,
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-11-01",
+  "schedule": {
+    "version": 1,
+    "recurrence": {
+      "type": "MONTHLY", "intervalMonths": 1,
+      "selection": { "type": "WINDOW", "startDay": 15, "endDay": 23, "shortMonthPolicy": "SKIP" }
+    }
+  },
+  "endCondition": { "type": "NEVER" }
+}
+```
+
+Прибирання субота–неділя — одне виконання на тиждень, із шаблонами підзадач:
+
+```json
+{
+  "title": "Прибирання",
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-10-25",
+  "subtasks": [
+    { "title": "Кухня", "estimatedDurationMinutes": 20 },
+    { "title": "Кімнати", "estimatedDurationMinutes": 30 }
+  ],
+  "schedule": {
+    "version": 1,
+    "recurrence": {
+      "type": "WEEKLY", "intervalWeeks": 1,
+      "selection": { "type": "WINDOW", "startWeekday": 6, "endWeekday": 7 }
+    }
+  }
+}
+```
+
+Тренування понеділок/четвер — два окремі виконання щотижня; завершення після восьми:
+
+```json
+{
+  "title": "Тренування",
+  "estimatedDurationMinutes": 60,
+  "priority": "HIGH",
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-10-26",
+  "schedule": {
+    "version": 1,
+    "recurrence": {
+      "type": "WEEKLY", "intervalWeeks": 1,
+      "selection": { "type": "DAYS", "weekdays": [1, 4] }
+    },
+    "localTime": "09:00"
+  },
+  "endCondition": { "type": "COUNT", "count": 8 }
+}
+```
+
+Заміна фільтра через 90 календарних днів після завершення попереднього виконання:
+
+```json
+{
+  "title": "Замінити фільтр",
+  "estimatedDurationMinutes": 15,
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-10-25",
+  "schedule": {
+    "version": 1,
+    "recurrence": { "type": "AFTER_COMPLETION", "intervalDays": 90 }
+  }
+}
+```
+
+### Історія, сфери й ручні перевірки
+
+RoutineAction має `id`, `routineId`, `type`, `timestamp`, `metadata: { before, after }`.
+CREATED містить `before: null`; інші події — повні before/after snapshots Routine DTO,
+включно зі збереженою назвою сфери й шаблонами підзадач. Типи: CREATED, UPDATED,
+PAUSED, RESUMED, DELETED. Якщо PATCH одночасно редагує поля й перемикає паузу,
+записуються UPDATED та PAUSED/RESUMED з повними snapshots однієї мутації.
+Історія сортується `timestamp ASC`, `id ASC`; UUID при однаковому часі не є порядком
+фактичного запису. При читанні DTO та історії JSON перевіряється; пошкоджені або
+непідтримувані дані дають `500`, а не передаються клієнту як валідний розклад.
+
+Усі мутації та їхній журнал — одна транзакція Serializable з трьома спробами при
+конфліктах. Фізичне видалення Area атомарно обробляє Task за чинними правилами,
+потім усі Routine за ID, включно з paused і deleted: `areaId` очищається,
+`updatedAt` оновлюється, створюється UPDATED зі snapshot назви. Статус паузи,
+розклад і підзадачі зберігаються. Історичні назви не замінюються поточною назвою.
+TaskAction не використовується для шаблонів. Спільне блокування Area перед
+записами Task/Routine захищає від конкурентного призначення видаленої сфери.
+
+Після POST збережіть `routineId` у Postman. Перевірте:
+
+1. `GET /api/routines/{{routineId}}` та `GET /api/routines` — шаблон доступний;
+   `GET /api/tasks` не отримав нової задачі через створення Routine.
+2. `PATCH /api/routines/{{routineId}}` з `{ "paused": true }`, потім із
+   `{ "paused": false }`; повтор того самого значення не додає події.
+3. PATCH з `{ "areaId": "{{areaId}}" }` для наявної сфери, потім її DELETE —
+   шаблон залишається з `areaId: null`; історія містить назву видаленої сфери.
+4. `GET /api/routines/{{routineId}}/history` — окремі події шаблону.
+5. DELETE шаблону → `204`; подальші GET/PATCH/DELETE та GET history → `404`.
+
+Міграція `20261025000000_routines` додає лише нові таблиці, enum, FK та індекси,
+без очищення даних чи редагування старих міграцій. Вона не застосовувалась у цьому
+кроці. Для ручної перевірки БД має окремо отримати цю міграцію.
+Тести використовують спільний підставний Prisma та локальний HTTP-сервер;
+реальні блокування PostgreSQL і виконання SQL-міграції не перевірені. Тести
+валідації та календарних helpers не є перевіркою генерації: генерації зараз немає.
+
 ## Логування HTTP-запитів
 
 Middleware перед CORS, JSON parser і маршрутами генерує новий UUID для кожного

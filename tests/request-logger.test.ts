@@ -42,6 +42,8 @@ test("app logs each request once with its response UUID, status and safe metadat
     { path: "/api/areas/invalid-id", method: "DELETE", status: 400, category: "api_error" },
     { path: "/api/areas?archived=true", method: "GET", status: 400, category: "validation_error" },
     { path: "/api/areas?unknown=true", method: "GET", status: 400, category: "validation_error" },
+    { path: "/api/routines", method: "POST", body: '{}', status: 400, category: "validation_error" },
+    { path: "/api/routines/invalid-id", method: "GET", status: 400, category: "api_error" },
     { path: "/api/tasks", method: "POST", body: JSON.stringify({ password: "x".repeat(110_000) }), status: 413, category: "body_too_large" },
     { path: "/missing", method: "GET", status: 404 },
     { path: "/api/tasks", method: "OPTIONS", status: 204 },

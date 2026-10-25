@@ -1,6 +1,7 @@
 import { ApiError } from "../../lib/api-error";
 import { AreasTransactionConflictError, type AreasRepository, type AreasTransactionRepository } from "./areas.repository";
 import type { CreateAreaInput, UpdateAreaInput } from "./areas.schemas";
+import { toRoutineResponse } from "../routines/routines.mapper";
 
 export function createAreasService(repository: AreasRepository) {
   async function transaction<T>(work: (tx: AreasTransactionRepository) => Promise<T>): Promise<T> {
@@ -33,6 +34,12 @@ export function createAreasService(repository: AreasRepository) {
         for (const task of tasks) {
           await tx.clearTaskArea(task.id);
           await tx.createAreaChanged(task.id, area);
+        }
+        const routines = await tx.routines.findLinked(id);
+        for (const routine of routines) {
+          const before = toRoutineResponse(routine);
+          const after = toRoutineResponse(await tx.routines.update(routine.id, { areaId: null }));
+          await tx.routines.createAction(routine.id, "UPDATED", { before, after });
         }
         await tx.remove(id);
       });

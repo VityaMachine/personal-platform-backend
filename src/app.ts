@@ -5,6 +5,7 @@ import { errorHandler } from "./middleware/error-handler";
 import { requestLogger } from "./middleware/request-logger";
 import { tasksRouter } from "./modules/tasks/tasks.routes";
 import { areasRouter } from "./modules/areas/areas.routes";
+import { routinesRouter } from "./modules/routines/routines.routes";
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
 
@@ -21,6 +22,7 @@ export function createApp(httpLogger: RequestHandler = requestLogger) {
 
   app.use("/api/tasks", tasksRouter);
   app.use("/api/areas", areasRouter);
+  app.use("/api/routines", routinesRouter);
 
   app.use(errorHandler);
   return app;
