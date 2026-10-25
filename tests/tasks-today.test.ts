@@ -1,0 +1,194 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext, type TaskTodayInput } from "../src/modules/tasks/tasks.today";
+import { fixture } from "./helpers/api-fixture";
+
+const now = new Date("2026-10-25T12:00:00Z");
+const task = (patch: Partial<TaskTodayInput> = {}): TaskTodayInput => ({
+  status: "TODO", archivedAt: null, deletedAt: null, plannedAt: null, dueAt: null, routineOccurrence: null, ...patch,
+});
+const context = (patch: Partial<TaskTodayContext> = {}): TaskTodayContext => ({ ...DEFAULT_TODAY_CONTEXT, ...patch });
+const date = (day: string) => new Date(`${day}T12:00:00Z`);
+
+test("ordinary date selection: none/limited/all, N and N+1, future/null and plannedAt OR dueAt", () => {
+  for (const [day, expected] of [
+    ["2026-10-21", [false, false, true]], ["2026-10-22", [false, true, true]],
+    ["2026-10-25", [true, true, true]], ["2026-10-26", [false, false, false]],
+  ] as const) {
+    for (const [index, overdueMode] of (["none", "limited", "all"] as const).entries()) {
+      for (const field of ["plannedAt", "dueAt"] as const) {
+        assert.equal(isTaskToday(task({ [field]: date(day) }), context({ overdueMode }), now), expected[index], `${day} ${field} ${overdueMode}`);
+      }
+    }
+  }
+  assert.equal(isTaskToday(task(), context(), now), false);
+  assert.equal(isTaskToday(task({ plannedAt: date("2026-10-26"), dueAt: date("2026-10-25") }), context({ overdueMode: "none" }), now), true);
+  assert.equal(isTaskToday(task({ plannedAt: date("2026-10-25"), dueAt: date("2026-10-26") }), context({ overdueMode: "none" }), now), true);
+  assert.equal(isTaskToday(task({ plannedAt: new Date("2026-10-25T23:59:00Z") }), context({ overdueMode: "none" }), now), true, "later hours of today still belong to the calendar day");
+});
+
+test("all six statuses and archive/delete exclusions apply to ordinary tasks and occurrences", () => {
+  for (const status of ["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED"] as const) {
+    for (const routineOccurrence of [null, { startDate: "2026-10-25", endDate: "2026-10-25", timezone: "UTC" }]) {
+      const value = task({ status, dueAt: date("2026-10-25"), routineOccurrence });
+      assert.equal(isTaskToday(value, context(), now), status !== "DONE" && status !== "CANCELED");
+      assert.equal(isTaskToday({ ...value, archivedAt: now }, context(), now), false);
+      assert.equal(isTaskToday({ ...value, deletedAt: now }, context(), now), false);
+    }
+  }
+});
+
+test("Routine window 15–23 is inclusive; future and overdue windows use their own calendar dates", () => {
+  const value = task({ routineOccurrence: { startDate: "2026-10-15", endDate: "2026-10-23", timezone: "Europe/Kyiv" } });
+  for (const day of ["2026-10-15", "2026-10-20", "2026-10-23"]) {
+    assert.equal(isTaskToday(value, context({ overdueMode: "none" }), date(day)), true);
+  }
+  assert.equal(isTaskToday(value, context({ overdueMode: "all" }), date("2026-10-14")), false);
+  assert.equal(isTaskToday(value, context({ overdueMode: "none" }), date("2026-10-24")), false);
+  assert.equal(isTaskToday(value, context(), date("2026-10-26")), true, "exactly 3 overdue calendar days");
+  assert.equal(isTaskToday(value, context(), date("2026-10-27")), false, "4 overdue days");
+  assert.equal(isTaskToday(value, context({ overdueMode: "all" }), date("2027-01-01")), true);
+});
+
+test("personal planning replaces the occurrence window, while dueAt remains an independent reason", () => {
+  const active = task({ routineOccurrence: { startDate: "2026-10-15", endDate: "2026-10-30", timezone: "UTC" } });
+  assert.equal(isTaskToday(active, context({ overdueMode: "none" }), now), true);
+  assert.equal(isTaskToday({ ...active, plannedAt: date("2026-10-26") }, context({ overdueMode: "none" }), now), false);
+  assert.equal(isTaskToday({ ...active, plannedAt: date("2026-10-21") }, context(), now), false);
+  assert.equal(isTaskToday({ ...active, plannedAt: date("2026-10-22") }, context(), now), true);
+  assert.equal(isTaskToday({ ...active, plannedAt: date("2026-10-26"), dueAt: date("2026-10-25") }, context({ overdueMode: "none" }), now), true);
+  const future = task({ routineOccurrence: { startDate: "2026-11-15", endDate: "2026-11-23", timezone: "UTC" } });
+  assert.equal(isTaskToday({ ...future, plannedAt: date("2026-10-25") }, context({ overdueMode: "none" }), now), true);
+  assert.equal(isTaskToday({ ...future, dueAt: date("2026-10-25") }, context({ overdueMode: "none" }), now), true);
+});
+
+test("request and occurrence timezones are independent and use one instant across midnight", () => {
+  const midnight = new Date("2026-10-24T22:30:00Z"); // Kyiv Oct 25, UTC/LA Oct 24
+  const value = task({ routineOccurrence: { startDate: "2026-10-25", endDate: "2026-10-25", timezone: "Europe/Kyiv" } });
+  assert.equal(isTaskToday(value, context({ timezone: "America/Los_Angeles", overdueMode: "none" }), midnight), true);
+  assert.equal(isTaskToday({ ...value, routineOccurrence: { ...value.routineOccurrence!, timezone: "UTC" } }, context({ timezone: "Europe/Kyiv", overdueMode: "none" }), midnight), false);
+  const ordinary = task({ dueAt: new Date("2026-10-25T00:30:00Z") });
+  assert.equal(isTaskToday(ordinary, context({ overdueMode: "none" }), midnight), false);
+  assert.equal(isTaskToday(ordinary, context({ timezone: "Europe/Kyiv", overdueMode: "none" }), midnight), true);
+  assert.equal(isTaskToday(ordinary, context({ overdueMode: "none" }), new Date("2026-10-25T00:00:00Z")), true);
+});
+
+test("calendar overdue arithmetic handles Kyiv spring/fall DST without 24-hour arithmetic", () => {
+  for (const [asOf, previous] of [["2026-03-30T00:30:00Z", "2026-03-28T22:30:00Z"],
+    ["2026-10-26T00:30:00Z", "2026-10-24T22:00:00Z"]]) {
+    assert.equal(isTaskToday(task({ dueAt: new Date(previous) }), context({ timezone: "Europe/Kyiv", overdueDays: 1 }), new Date(asOf)), true);
+  }
+  const occurrence = task({ routineOccurrence: { startDate: "2026-03-29", endDate: "2026-03-29", timezone: "Europe/Kyiv" } });
+  assert.equal(isTaskToday(occurrence, context({ overdueDays: 1 }), new Date("2026-03-30T20:59:59Z")), true);
+  assert.equal(isTaskToday(occurrence, context({ overdueDays: 1 }), new Date("2026-03-30T21:00:00Z")), false);
+});
+
+test("POST/GET/list/PATCH share validated context; default UTC and summary remain independent", async (t) => {
+  const f = await fixture(t); f.setTime(new Date("2026-10-24T22:30:00Z"));
+  const query = "?timezone=Europe%2FKyiv&overdueMode=none&overdueDays=3";
+  f.commitConflicts(2);
+  let clock = f.taskClockCalls();
+  const created = await f.request("POST", query, { title: "Tomorrow in UTC, today in Kyiv", dueAt: "2026-10-25T00:30:00Z", estimatedDurationMinutes: 10 });
+  assert.equal(created.status, 201); assert.equal(created.body.isToday, true);
+  assert.equal(f.taskClockCalls() - clock, 1, "one response clock read across all serialization attempts");
+  assert.equal("isToday" in f.state().tasks[0], false);
+  assert.equal("timezone" in f.state().tasks[0], false);
+  const before = structuredClone(f.state());
+  for (const path of [`/${created.body.id}${query}`, query]) {
+    clock = f.taskClockCalls();
+    const result = (await f.request("GET", path)).body;
+    const value = Array.isArray(result) ? result[0] : result;
+    assert.equal(value.isToday, true); assert.deepEqual(value.summary, created.body.summary);
+    assert.equal(f.taskClockCalls() - clock, 1);
+  }
+  const defaultResult = (await f.request("GET", `/${created.body.id}`)).body;
+  assert.equal(defaultResult.isToday, false); assert.deepEqual(defaultResult.summary, created.body.summary);
+  assert.equal((await f.request("GET", `/${created.body.id}?overdueMode=none`)).body.isToday, false);
+  assert.deepEqual(f.state(), before, "GET context does not persist preferences or alter records");
+  clock = f.taskClockCalls();
+  const changed = await f.request("PATCH", `/${created.body.id}${query}`, { title: "Changed" });
+  assert.equal(changed.body.isToday, true); assert.equal(f.taskClockCalls() - clock, 1);
+  assert.deepEqual(changed.body.summary, created.body.summary);
+  assert.equal((await f.request("PATCH", `/${created.body.id}?overdueMode=none`, { title: "Again" })).body.isToday, false);
+});
+
+test("view=today filters the existing ordered array with no writes, generation or per-task history requests", async (t) => {
+  const f = await fixture(t); f.setTime(now);
+  const ids: string[] = [];
+  for (const dueAt of ["2026-10-25", "2026-10-26", "2026-10-22", "2026-10-21"]) {
+    ids.push((await f.request("POST", "", { title: dueAt, dueAt: `${dueAt}T12:00:00Z`, estimatedDurationMinutes: 10 })).body.id);
+  }
+  await f.request("PATCH", `/${ids[0]}`, { status: "PAUSED" });
+  const all = (await f.request("GET")).body;
+  const before = structuredClone(f.state()), reads = { ...f.reads }, operations = f.operations.length;
+  const today = await f.request("GET", "?view=today");
+  assert.equal(today.status, 200); assert.ok(Array.isArray(today.body));
+  assert.deepEqual(today.body, all.filter((entry: { isToday: boolean }) => entry.isToday));
+  assert.deepEqual(new Set(today.body.map((entry: { id: string }) => entry.id)), new Set([ids[0], ids[2]]));
+  assert.equal(f.reads.tasks - reads.tasks, 1); assert.equal(f.reads.history - reads.history, 1);
+  assert.equal(f.reads.routines, reads.routines); assert.equal(f.reads.occurrences, reads.occurrences);
+  assert.deepEqual(f.state(), before); assert.equal(f.operations.length, operations);
+  assert.equal((await f.request("GET", "?view=today&overdueMode=all")).body.length, 3);
+  assert.equal((await f.request("GET", "?view=today&overdueMode=none")).body.length, 1);
+  assert.equal((await f.request("GET", "?archived=false&view=today")).body.length, 2);
+  await f.request("PATCH", `/${ids[0]}`, { archived: true });
+  assert.equal((await f.request("GET", `/${ids[0]}`)).body.isToday, false);
+  assert.equal((await f.request("GET", "?archived=true")).body[0].isToday, false);
+  await f.request("DELETE", `/${ids[2]}`);
+  assert.equal((await f.request("GET", `/${ids[2]}`)).status, 404);
+  assert.deepEqual((await f.request("GET", "?view=today")).body, []);
+});
+
+test("query rejects invalid context, unknown views, duplicates, archive conflict and client-supplied clocks before writes", async (t) => {
+  const f = await fixture(t); f.setTime(now);
+  const created = (await f.request("POST", "", { title: "Validation", dueAt: now.toISOString(), estimatedDurationMinutes: 10 })).body;
+  const invalid = ["?timezone=", "?timezone=Mars%2FUnknown", "?timezone=%2B03%3A00", "?timezone=UTC&timezone=Europe%2FKyiv",
+    "?overdueMode=", "?overdueMode=other", "?overdueMode=none&overdueMode=all", "?overdueDays=1&overdueDays=2",
+    ...["0", "366", "-1", "1.5", "1e2", "", "NaN"].map((days) => `?overdueDays=${days}`),
+    "?now=2026-10-25T12:00:00Z", "?date=2026-10-25", "?unknown=true", "?view=all", "?view=today&view=today"];
+  const before = structuredClone(f.state()), attempts = f.attempts();
+  for (const query of invalid) {
+    for (const [method, path, body] of [["GET", query, undefined], ["GET", `/${created.id}${query}`, undefined],
+      ["POST", query, { title: "Invalid context", dueAt: now.toISOString(), estimatedDurationMinutes: 10 }],
+      ["PATCH", `/${created.id}${query}`, { title: "No write" }]] as const) {
+      assert.equal((await f.request(method, path, body)).status, 400, `${method} ${query}`);
+    }
+  }
+  assert.equal((await f.request("GET", "?archived=true&view=today")).status, 400);
+  assert.equal((await f.request("POST", "", { title: "No computed inputs", dueAt: now.toISOString(), estimatedDurationMinutes: 10, isToday: true })).status, 400);
+  assert.equal((await f.request("PATCH", `/${created.id}`, { isToday: true })).status, 400);
+  assert.equal(f.attempts(), attempts); assert.deepEqual(f.state(), before);
+  for (const query of ["?overdueDays=1", "?overdueDays=365", "?timezone=UTC", "?timezone=Asia%2FKathmandu"]) {
+    assert.equal((await f.request("GET", query)).status, 200);
+  }
+});
+
+test("saved Massage and monthly windows survive Routine pause/delete; personal plan overrides without changing occurrence", async (t) => {
+  const f = await fixture(t); f.setTime(new Date("2026-10-24T12:00:00Z"));
+  const massage = (await f.routineRequest("POST", "", { title: "Масаж", estimatedDurationMinutes: 30, timezone: "Europe/Kyiv", startDate: "2026-10-25",
+    schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 2 }, localTime: "18:00" } })).body;
+  const generated = (await f.routineRequest("POST", `/${massage.id}/generate`, { from: "2026-10-25", to: "2026-10-25" })).body;
+  const id = generated.created[0].taskId;
+  f.setTime(new Date("2026-10-24T22:30:00Z")); // Kyiv Oct 25, long before occurrence localTime
+  const detail = (await f.request("GET", `/${id}?timezone=America%2FLos_Angeles&overdueMode=none`)).body;
+  assert.equal(detail.isToday, true); assert.equal(detail.plannedAt, null); assert.equal(detail.dueAt, null);
+  const occurrence = structuredClone(detail.routineOccurrence);
+  await f.routineRequest("PATCH", `/${massage.id}`, { paused: true });
+  assert.equal((await f.request("GET", `/${id}?overdueMode=none`)).body.isToday, true);
+  await f.routineRequest("DELETE", `/${massage.id}`);
+  const before = structuredClone(f.state()), reads = { ...f.reads };
+  assert.equal((await f.request("GET", "?view=today&overdueMode=none")).body[0].id, id);
+  assert.deepEqual(f.state(), before); assert.equal(f.reads.routines, reads.routines);
+  assert.equal((await f.request("PATCH", `/${id}?timezone=Europe%2FKyiv&overdueMode=none`, { plannedAt: "2026-10-26T09:00:00+02:00" })).body.isToday, false);
+  const deadline = (await f.request("PATCH", `/${id}?timezone=Europe%2FKyiv&overdueMode=none`, { dueAt: "2026-10-25T18:00:00+02:00" })).body;
+  assert.equal(deadline.isToday, true); assert.deepEqual(deadline.routineOccurrence, occurrence);
+
+  f.setTime(new Date("2026-11-01T12:00:00Z"));
+  const monthly = (await f.routineRequest("POST", "", { title: "Показники", estimatedDurationMinutes: 10, timezone: "Europe/Kyiv", startDate: "2026-11-01",
+    schedule: { version: 1, recurrence: { type: "MONTHLY", intervalMonths: 1, selection: { type: "WINDOW", startDay: 15, endDay: 23, shortMonthPolicy: "SKIP" } } } })).body;
+  const monthlyId = (await f.routineRequest("POST", `/${monthly.id}/generate`, { from: "2026-11-20", to: "2026-11-21" })).body.created[0].taskId;
+  for (const [day, expected] of [["2026-11-14", false], ["2026-11-15", true], ["2026-11-23", true], ["2026-11-24", false]] as const) {
+    f.setTime(date(day));
+    assert.equal((await f.request("GET", `/${monthlyId}?overdueMode=none`)).body.isToday, expected);
+  }
+});

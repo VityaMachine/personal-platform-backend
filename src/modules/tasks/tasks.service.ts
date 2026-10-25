@@ -11,6 +11,7 @@ import { createSubtasksService } from "./subtasks.service";
 import { calculateTaskSummary } from "./tasks.summary";
 import { toAreaSnapshot } from "../areas/areas.mapper";
 import { createTaskWithSubtasks } from "./tasks.creation";
+import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext } from "./tasks.today";
 
 export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
   async function assignableArea(id: string | null | undefined, tx: TasksTransactionRepository) {
@@ -27,8 +28,16 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
       entries.push(action);
       grouped.set(action.taskId, entries);
     }
+    return { tasks, grouped };
+  }
+  function present(snapshot: Awaited<ReturnType<typeof summarize>>, context: Readonly<TaskTodayContext>) {
+    // One instant after the successful commit, also when the transaction needed retries.
+    // Summary and calendar selection have independent rules over the same consistent snapshot.
     const asOf = now();
-    return tasks.map((task) => ({ ...task, summary: calculateTaskSummary(task, grouped.get(task.id) ?? [], asOf) }));
+    return snapshot.tasks.map((task) => ({ ...task,
+      summary: calculateTaskSummary(task, snapshot.grouped.get(task.id) ?? [], asOf),
+      isToday: isTaskToday(task, context, asOf),
+    }));
   }
   async function findTask(id: string, reader: Pick<TasksRepository, "findFirst"> = repository) {
     const task = await reader.findFirst({ id, deletedAt: null });
@@ -49,23 +58,27 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
 
   return {
     subtasks: createSubtasksService({ findTask, transaction }),
-    list(query: ListTasksInput) {
-      return transaction(async (tx) => summarize(await tx.findMany({
+    async list(query: ListTasksInput) {
+      const snapshot = await transaction(async (tx) => summarize(await tx.findMany({
         deletedAt: null,
         archivedAt: query.archived === "true" ? { not: null } : null,
       }), tx));
+      const tasks = present(snapshot, query);
+      return query.view === "today" ? tasks.filter((task) => task.isToday) : tasks;
     },
-    get(id: string) {
-      return transaction(async (tx) => (await summarize([await findTask(id, tx)], tx))[0]);
+    async get(id: string, context: Readonly<TaskTodayContext> = DEFAULT_TODAY_CONTEXT) {
+      const snapshot = await transaction(async (tx) => summarize([await findTask(id, tx)], tx));
+      return present(snapshot, context)[0];
     },
-    create(data: CreateTaskInput) {
+    async create(data: CreateTaskInput, context: Readonly<TaskTodayContext> = DEFAULT_TODAY_CONTEXT) {
       const { subtasks = [], ...fields } = data;
-      return transaction(async (tx) => {
+      const snapshot = await transaction(async (tx) => {
         const area = await assignableArea(fields.areaId, tx);
         const created = await createTaskWithSubtasks(tx, fields, subtasks, { area });
         const task = subtasks.length ? await findTask(created.id, tx) : { ...created, area, subtasks: [], routineOccurrence: null };
-        return (await summarize([task], tx))[0];
+        return summarize([task], tx);
       });
+      return present(snapshot, context)[0];
     },
     history(id: string) {
       return transaction(async (tx) => {
@@ -73,9 +86,9 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
         return tx.findHistory(id);
       });
     },
-    update(id: string, input: UpdateTaskInput) {
+    async update(id: string, input: UpdateTaskInput, context: Readonly<TaskTodayContext> = DEFAULT_TODAY_CONTEXT) {
       const { archived, isCompleted, ...fields } = input;
-      return transaction(async (tx) => {
+      const snapshot = await transaction(async (tx) => {
         const before = await findTask(id, tx);
         const areaChanged = fields.areaId !== undefined && fields.areaId !== before.areaId;
         // Even a same-ID write must take the Area lock before updating Task:
@@ -123,8 +136,9 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
             after: { archivedAt: updated.archivedAt },
           });
         }
-        return (await summarize([updated], tx))[0];
+        return summarize([updated], tx);
       });
+      return present(snapshot, context)[0];
     },
     remove(id: string) {
       return transaction(async (tx) => {

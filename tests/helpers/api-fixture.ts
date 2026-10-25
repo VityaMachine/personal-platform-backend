@@ -41,6 +41,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   let routineChildrenBeforeFailure: number | undefined;
   let attempts = 0;
   let fixedTime: Date | undefined;
+  let taskClockCalls = 0;
   let deleteOnAssignmentConflict: string | undefined;
   let rawConflictCode = "P2034";
   const now = () => fixedTime ? new Date(fixedTime) : new Date();
@@ -367,7 +368,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   const logs: string[] = [];
   app.use(createRequestLogger(createLogger("production", { write(line) { logs.push(line); } })));
   app.use(express.json());
-  app.use("/api/tasks", createTasksRouter(() => client, now));
+  app.use("/api/tasks", createTasksRouter(() => client, () => { taskClockCalls++; return now(); }));
   app.use("/api/areas", createAreasRouter(() => client));
   app.use("/api/routines", createRoutinesRouter(() => client, now));
   app.use(errorHandler);
@@ -391,6 +392,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   const routineRequest = (method: string, path = "", body?: unknown) => send(base.replace(/tasks$/, "routines") + path, method, body);
   return {
     request, areaRequest, routineRequest, logs, reads, operations, state: () => state, setTime: (time: Date) => { fixedTime = time; },
+    taskClockCalls: () => taskClockCalls,
     failRoutineWrites: (after = 0) => { routineWritesBeforeFailure = after; },
     occurrenceConflicts: (count: number) => { occurrenceConflicts = count; },
     failOccurrences: (after = 0) => { occurrencesBeforeFailure = after; },

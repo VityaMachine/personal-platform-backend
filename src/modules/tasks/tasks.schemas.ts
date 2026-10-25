@@ -4,6 +4,7 @@ import { TaskPriority, TaskStatus } from "../../generated/prisma/client";
 import { ApiError } from "../../lib/api-error";
 import { sumSubtaskDurations, taskFields } from "./tasks.fields";
 import { initialSubtaskSchema } from "./subtasks.schemas";
+import { timezoneSchema } from "../routines/routines.schedule";
 
 const { title, duration, note } = taskFields;
 const dateTime = z.iso.datetime({ offset: true }).transform((value) => new Date(value));
@@ -53,9 +54,15 @@ export const updateTaskSchema = z.strictObject({
   .refine((data) => data.status !== "CANCELED" || data.cancellationNote !== undefined,
     { message: "CANCELED requires a nonempty cancellationNote.", path: ["cancellationNote"] });
 
-export const listTasksSchema = z.strictObject({
-  archived: z.enum(["true", "false"]).optional(),
+export const taskContextQuerySchema = z.strictObject({
+  timezone: timezoneSchema.default("UTC"),
+  overdueMode: z.enum(["none", "limited", "all"]).default("limited"),
+  overdueDays: z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().min(1).max(365)).default(3),
 });
+export const listTasksSchema = taskContextQuerySchema.extend({
+  archived: z.enum(["true", "false"]).optional(),
+  view: z.literal("today").optional(),
+}).refine((query) => query.archived !== "true" || query.view !== "today", "archived=true cannot be combined with view=today.");
 
 // Keep the existing id error message instead of the generic Zod error response.
 export const taskIdSchema = z.unknown().transform((id) => {

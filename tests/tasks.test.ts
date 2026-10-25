@@ -447,6 +447,7 @@ test("creation with omitted or empty subtasks preserves the original contract", 
 test("creation with subtasks returns the complete sorted DTO and only creation events", async (t) => {
   const ids = ["00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"];
   const f = await fixture(t, [...ids]);
+  f.setTime(new Date("2026-10-25T12:00:00Z"));
   const result = await f.request("POST", "", {
     title: "  Update UI  ", dueAt: input.dueAt, subtasks: initialSubtasks,
   });
@@ -456,7 +457,7 @@ test("creation with subtasks returns the complete sorted DTO and only creation e
   const { routineOccurrenceId: _occurrenceId, ...parentDto } = JSON.parse(JSON.stringify(parent));
   const expectedChildren = JSON.parse(JSON.stringify([...f.state().subtasks].reverse()));
   assert.deepEqual(result.body, {
-    ...parentDto, routineOccurrence: null, area: null, isCompleted: false, subtasks: expectedChildren,
+    ...parentDto, routineOccurrence: null, area: null, isCompleted: false, isToday: true, subtasks: expectedChildren,
     summary: calculateTaskSummary(parent, f.state().actions, new Date(result.body.summary.asOf)),
   });
   assert.equal(result.body.title, "Update UI");

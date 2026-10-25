@@ -141,6 +141,7 @@ DTO підзадач, відсортованими за `createdAt ASC`, пот�
 | `GET /api/tasks` | Неархівовані й невидалені задачі, нові спочатку |
 | `GET /api/tasks?archived=true` | Лише архівовані й невидалені задачі |
 | `GET /api/tasks?archived=false` | Звичайний список |
+| `GET /api/tasks?view=today` | Лише задачі з обчисленим `isToday: true`, звичайний масив |
 | `GET /api/tasks/:id` | Одна невидалена задача, включно з архівованою |
 | `PATCH /api/tasks/:id` | Редагування полів, статусу та/або архіву |
 | `DELETE /api/tasks/:id` | Встановлення `deletedAt`, відповідь `204` |
@@ -468,7 +469,8 @@ nullable `Task.areaId`, FK з `ON DELETE RESTRICT`, індекс `Task_areaId_id
 
 **Збереження Routine не створює жодного Task.** Генерація календарних та AFTER_COMPLETION виконань
 запускається лише явним POST `/api/routines/:id/generate`. Cron, автоматичних
-запусків із GET, `isToday` та frontend немає. Read-only preview розраховує календарні
+запусків із GET та frontend немає. `isToday` обчислюється лише для вже збережених
+Task, як описано нижче. Read-only preview розраховує календарні
 виконання, не створюючи Task, RoutineAction або інших записів.
 
 | Метод і маршрут | Результат |
@@ -1241,6 +1243,154 @@ Error handler додає до того самого запису безпечн�
 JSON у stdout, без завантаження `pino-pretty`; інші значення `NODE_ENV` також дають JSON.
 Для production задавайте `NODE_ENV=production`, зокрема при `npm ci --omit=dev`.
 
+## «Сьогодні»: isToday і view=today
+
+Усі повні Task DTO у GET списку, GET деталей, POST та PATCH містять boolean
+`isToday`. Це обчислюване поле, без колонки БД. area, subtasks, routineOccurrence,
+summary, isCompleted та всі чинні поля збережені. Підзадачі окремого isToday не мають.
+
+На цих чотирьох маршрутах підтримуються query-параметри:
+
+| Параметр | Значення | Default |
+| --- | --- | --- |
+| `timezone` | валідний IANA identifier за чинним timezone helper, наприклад `Europe/Kyiv` | `UTC` |
+| `overdueMode` | `none`, `limited`, `all` | `limited` |
+| `overdueDays` | ціле десяткове число 1–365 | `3` |
+
+**Без переданого timezone використовується UTC**, не timezone сервера чи браузера.
+Після підключення frontend він передаватиме налаштування користувача з localStorage
+в кожному запиті. Backend не зберігає ці налаштування в Task або глобальному стані;
+контекст одного запиту не змінює наступні. overdueDays перевіряється також у режимах
+none/all, хоча там не впливає на відбір. Невідомі поля, повторені query-параметри,
+невідомі view/mode, невалідні timezone та overdueDays → `400` до записів.
+
+Поточний instant отримується один раз для всієї відповіді після успішної транзакції,
+включно зі спробами після serialization conflict. Чистий `tasks.today.ts` отримує
+Task, контекст та явний now. Параметрів now/date/asOf для підміни часу клієнтом немає;
+вони відхиляються як невідомі. Для тестів використовується чинний інжектований clock.
+
+`GET /api/tasks?view=today` повертає **масив** лише з isToday=true, без обгортки.
+Без view зберігається повний чинний список та його сортування `createdAt DESC,
+id DESC`; задачі з isToday=false не приховуються. `archived=false&view=today`
+дозволене, `archived=true&view=today` → `400`. view передається лише в GET списку;
+GET деталей, POST та PATCH приймають три параметри контексту без view/archived.
+Поточний API завантажує весь список без пагінації: відбір застосовується до нього
+і використовує той самий isToday, а не іншу копію правил. Історія summary читається
+одним пакетним запитом; нових запитів для кожної Task або occurrence немає.
+
+### Правила «Сьогодні»
+
+DONE, CANCELED, archivedAt != null або deletedAt != null завжди дають false.
+М'яко видалені Task, як раніше, недоступні через API. PAUSED та POSTPONED самі
+по собі не виключають задачу; застосовуються її поточні збережені дати.
+
+Для звичайної Task plannedAt і dueAt незалежно переводяться в локальні дати
+timezone **запиту**. Достатньо однієї відповідності:
+
+- none — дата дорівнює сьогодні;
+- limited — від сьогодні мінус overdueDays календарних днів до сьогодні включно;
+- all — сьогодні або раніше.
+
+Наприклад, при сьогодні 2026-10-25 і limited=3 входять 22–25 жовтня; 21 та 26 — ні.
+Майбутня дата або null не відповідає. Без обох дат і без occurrence isToday=false.
+Конкретна година сьогодні не обмежує календарний відбір: дата сьогодні входить
+навіть тоді, коли її timestamp пізніший за поточну годину.
+
+Для збереженого RoutineOccurrence локальні startDate/endDate залишаються в
+**timezone occurrence**. Сьогодні визначається з того самого request instant у
+цьому timezone; межі не переводяться в UTC або timezone запиту. Без plannedAt:
+
+- сьогодні всередині вікна включно — true;
+- раніше startDate — false;
+- після endDate: none → false, limited → не більше N календарних днів після
+  endDate, all → true.
+
+Вікно 15–23 активне й 15-го, й 23-го. localTime та instant не приховують задачу
+до конкретної години. Для all-day не створюється UTC-північ. Обидва види відбору
+використовують Temporal та календарні дні, а не N × 24 години, включно з DST.
+
+**Особистий plannedAt замінює вікно occurrence як підставу включення.** Саме
+збережене occurrence не змінюється. dueAt лишається незалежною підставою:
+
+```text
+plannedAt заданий: isToday = plannedAt-відбір OR dueAt-відбір
+plannedAt відсутній: isToday = occurrence-відбір OR dueAt-відбір
+```
+
+Отже, **дедлайн сьогодні включає задачу навіть при особистому плануванні на
+майбутнє**. Дати plannedAt/dueAt використовують timezone запиту, а вікно — свій.
+Пауза або видалення шаблону Routine не приховує створену Task; поточний шаблон
+для цього не завантажується. GET нічого не генерує та не записує. Цей відбір
+не залежить від віку Task, часу в статусах або достовірності summary.
+
+### Postman: звичайна Task
+
+Body → raw → JSON, `Content-Type: application/json`:
+
+```http
+POST {{baseUrl}}/api/tasks?timezone=Europe%2FKyiv&overdueMode=limited&overdueDays=3
+```
+
+```json
+{
+  "title": "Перевірити документ",
+  "dueAt": "2026-10-22T18:00:00+03:00",
+  "estimatedDurationMinutes": 10
+}
+```
+
+За поточної локальної дати 2026-10-25 буде isToday=true. Збережіть id як taskId:
+
+```http
+GET {{baseUrl}}/api/tasks/{{taskId}}?timezone=Europe%2FKyiv&overdueMode=none
+GET {{baseUrl}}/api/tasks?view=today&timezone=Europe%2FKyiv&overdueMode=limited&overdueDays=3
+```
+
+При тій самій даті перший GET повертає Task з isToday=false, другий включає її.
+Це приклад для вказаної дати, а не спосіб підмінити production clock; для іншого
+дня змініть dueAt відповідно. Запити без контексту працюють із UTC/limited/3.
+
+### Postman: збережений «Масаж»
+
+Для календарного шаблону «Масаж» із прикладу вище збережіть ID як massageRoutineId.
+Генерація лишається окремим явним POST:
+
+```http
+POST {{baseUrl}}/api/routines/{{massageRoutineId}}/generate
+```
+
+```json
+{ "from": "2026-10-25", "to": "2026-11-07" }
+```
+
+Збережіть taskId виконання 2026-10-25 як massageTaskId:
+
+```http
+GET {{baseUrl}}/api/tasks?view=today&timezone=Europe%2FKyiv&overdueMode=none
+GET {{baseUrl}}/api/tasks/{{massageTaskId}}?timezone=Europe%2FKyiv&overdueMode=none
+```
+
+Якщо сьогодні в occurrence Europe/Kyiv 25 жовтня, виконання входить навіть до
+18:00. plannedAt/dueAt початково null. Перенесіть особистий план:
+
+```http
+PATCH {{baseUrl}}/api/tasks/{{massageTaskId}}?timezone=Europe%2FKyiv&overdueMode=none
+```
+
+```json
+{ "plannedAt": "2026-10-26T09:00:00+02:00" }
+```
+
+25 жовтня isToday=false, хоча незмінне occurrence має startDate=endDate=2026-10-25.
+Той самий PATCH із body нижче поверне true через незалежний дедлайн:
+
+```json
+{ "dueAt": "2026-10-25T18:00:00+02:00" }
+```
+
+Приклади навмисно не додають now/date до URL. Перевірка
+`GET {{baseUrl}}/api/tasks?archived=true&view=today` → `400`.
+
 ## Часовий підсумок Task
 
 GET списку, GET деталей, POST і PATCH задачі повертають додаткове поле `summary`.
@@ -1291,8 +1441,11 @@ GET списку, GET деталей, POST і PATCH задачі поверта�
 
 Історія читається на backend: для непорожнього списку одним пакетним запитом
 лише `CREATED` та `STATUS_CHANGED` для всіх повернутих задач. Snapshot і події
-читаються в одній транзакції `Serializable`; після мутацій розрахунок виконується
-після всіх записів подій у тій самій транзакції. Історія не переписується.
+читаються в одній транзакції `Serializable`, після мутацій — після всіх записів
+подій у ній. Після успішного commit фіксується один `asOf` для відповіді й чистого
+розрахунку за цим узгодженим snapshot. Повтори транзакції не читають clock повторно
+для відповіді. Історія не переписується. Правила summary та календарного isToday
+незалежні; використовується лише той самий instant запиту.
 
 ### Достовірність журналу
 

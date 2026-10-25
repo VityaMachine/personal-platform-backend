@@ -3,7 +3,7 @@ import { Router, type Request, type RequestHandler, type Response } from "expres
 import type { PrismaClient } from "../../generated/prisma/client";
 import { createTasksController } from "./tasks.controller";
 import { createTasksRepository } from "./tasks.repository";
-import { createTaskSchema, listTasksSchema, taskIdSchema, updateTaskSchema } from "./tasks.schemas";
+import { createTaskSchema, listTasksSchema, taskContextQuerySchema, taskIdSchema, updateTaskSchema } from "./tasks.schemas";
 import { createTasksService } from "./tasks.service";
 import { createSubtasksController } from "./subtasks.controller";
 import { createSubtaskSchema, subtaskIdSchema, updateSubtaskSchema } from "./subtasks.schemas";
@@ -20,6 +20,10 @@ const validateId: RequestHandler = (request, response, next) => {
 };
 const validateList: RequestHandler = (request, response, next) => {
   response.locals.query = listTasksSchema.parse(request.query);
+  next();
+};
+const validateContext: RequestHandler = (request, response, next) => {
+  response.locals.context = taskContextQuerySchema.parse(request.query);
   next();
 };
 const validateCreate: RequestHandler = (request, response, next) => {
@@ -50,14 +54,14 @@ export function createTasksRouter(client?: () => PrismaClient, now?: () => Date)
   const subtasks = createSubtasksController(service.subtasks);
 
   router.get("/", validateList, route(controller.list));
-  router.post("/", validateCreate, route(controller.create));
+  router.post("/", validateContext, validateCreate, route(controller.create));
   router.get("/:id/subtasks", validateId, route(subtasks.list));
   router.post("/:id/subtasks", validateId, validateSubtaskCreate, route(subtasks.create));
   router.patch("/:id/subtasks/:subtaskId", validateId, validateSubtaskId, validateSubtaskUpdate, route(subtasks.update));
   router.delete("/:id/subtasks/:subtaskId", validateId, validateSubtaskId, route(subtasks.remove));
   router.get("/:id/history", validateId, route(controller.history));
-  router.get("/:id", validateId, route(controller.get));
-  router.patch("/:id", validateId, validateUpdate, route(controller.update));
+  router.get("/:id", validateId, validateContext, route(controller.get));
+  router.patch("/:id", validateId, validateContext, validateUpdate, route(controller.update));
   router.delete("/:id", validateId, route(controller.remove));
 
   return router;
