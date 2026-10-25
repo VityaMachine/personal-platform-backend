@@ -32,8 +32,9 @@ export function createRoutineQueries(db: Prisma.TransactionClient) {
       const json: Prisma.InputJsonValue = JSON.parse(JSON.stringify(metadata));
       return db.routineAction.create({ data: { routineId, type, metadata: json } });
     },
-    findHistory(routineId: string) {
-      return db.routineAction.findMany({ where: { routineId }, orderBy: [{ timestamp: "asc" }, { id: "asc" }] });
+    findHistory(routineId: string, take?: number) {
+      return db.routineAction.findMany({ where: { routineId }, orderBy: [{ timestamp: "asc" }, { id: "asc" }],
+        ...(take === undefined ? {} : { take }) });
     },
   };
 }

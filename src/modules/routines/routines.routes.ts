@@ -4,6 +4,7 @@ import { createRoutinesController } from "./routines.controller";
 import { createRoutinesRepository } from "./routines.repository";
 import { createRoutineSchema, routineIdSchema, routineQuerySchema, updateRoutineSchema } from "./routines.schemas";
 import { createRoutinesService } from "./routines.service";
+import { routinePreviewQuerySchema } from "./routines.preview.schemas";
 
 const route = <Locals extends Record<string, unknown>>(
   handler: (request: Request, response: Response<unknown, Locals>) => Promise<void>,
@@ -23,6 +24,9 @@ const validateUpdate: RequestHandler = (request, response, next) => {
 export function createRoutinesRouter(client?: () => PrismaClient, now?: () => Date) {
   const router = Router();
   const controller = createRoutinesController(createRoutinesService(createRoutinesRepository(client), now));
+  router.get("/:id/preview", validateId, (request, response, next) => {
+    response.locals.query = routinePreviewQuerySchema.parse(request.query); next();
+  }, route(controller.preview));
   router.use(validateQuery);
   router.get("/", route(controller.list));
   router.post("/", validateCreate, route(controller.create));

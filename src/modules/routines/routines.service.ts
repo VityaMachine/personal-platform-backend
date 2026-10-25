@@ -2,6 +2,9 @@ import { ApiError } from "../../lib/api-error";
 import { toRoutineActionResponse, toRoutineResponse } from "./routines.mapper";
 import { RoutinesTransactionConflictError, type RoutinesRepository, type RoutinesTransactionRepository } from "./routines.repository";
 import { routineStateSchema, type CreateRoutineInput, type UpdateRoutineInput, type RoutineState } from "./routines.schemas";
+import { calculateRoutinePreview } from "./routines.preview";
+import { normalizePreviewHistory, PREVIEW_HISTORY_BUDGET } from "./routines.preview-history";
+import type { RoutinePreviewQuery } from "./routines.preview.schemas";
 
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 export function createRoutinesService(repository: RoutinesRepository, now: () => Date = () => new Date()) {
@@ -31,6 +34,29 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
   return {
     list() { return transaction(async (tx) => (await tx.findMany({ deletedAt: null })).map(toRoutineResponse)); },
     get(id: string) { return transaction((tx) => find(id, tx)); },
+    preview(id: string, query: RoutinePreviewQuery) {
+      return transaction(async (tx) => {
+        const routine = await find(id, tx);
+        if (query.completedAt !== undefined && routine.schedule.recurrence.type !== "AFTER_COMPLETION") {
+          throw new ApiError(400, "Completion context requires AFTER_COMPLETION.");
+        }
+        const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
+        const history = normalizePreviewHistory(routine, actions);
+        if (history.limitations.includes("HISTORY_BUDGET_EXCEEDED")) {
+          return { routineId: id, timezone: routine.timezone, from: query.from, to: query.to, occurrences: [], truncated: false,
+            limitations: ["CURRENT_CONFIGURATION_PROJECTION", ...history.limitations] };
+        }
+        try {
+          return calculateRoutinePreview(routine, query.from, query.to, query.limit, { ...history,
+            completionContext: query.completedAt === undefined ? undefined : {
+              completedAt: query.completedAt, completedOccurrenceNumber: query.completedOccurrenceNumber!,
+            } });
+        } catch (error) {
+          if (error instanceof RangeError) throw new ApiError(400, error.message);
+          throw error;
+        }
+      });
+    },
     create(input: CreateRoutineInput) {
       return transaction(async (tx) => {
         const { subtasks, ...fields } = routineStateSchema.parse(input);

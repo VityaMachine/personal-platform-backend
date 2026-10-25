@@ -40,7 +40,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   let deleteOnAssignmentConflict: string | undefined;
   let rawConflictCode = "P2034";
   const now = () => fixedTime ? new Date(fixedTime) : new Date();
-  const reads = { tasks: 0, subtasks: 0, history: 0, areas: 0, areaLocks: 0, routines: 0 };
+  const reads = { tasks: 0, subtasks: 0, history: 0, areas: 0, areaLocks: 0, routines: 0, routineHistory: 0 };
   const operations: string[] = [];
   function taskResult(db: typeof state, task: Task, include?: Prisma.TaskInclude) {
     if (!include) return structuredClone(task);
@@ -138,6 +138,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
           .map((routine) => routineResult(db, routine, include));
       },
       async findFirst({ where, include }: { where: { id: string; deletedAt: null }; include: unknown }) {
+        reads.routines++;
         const routine = db.routines.find((routine) => routine.id === where.id && routine.deletedAt === null);
         return routine ? routineResult(db, routine, include) : null;
       },
@@ -175,10 +176,11 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
         db.routineActions.push(action);
         return structuredClone(action);
       },
-      async findMany({ where, orderBy }: { where: { routineId: string }; orderBy: unknown }) {
+      async findMany({ where, orderBy, take }: { where: { routineId: string }; orderBy: unknown; take?: number }) {
+        reads.routineHistory++;
         assert.deepEqual(orderBy, [{ timestamp: "asc" }, { id: "asc" }]);
         return structuredClone(db.routineActions.filter((action) => action.routineId === where.routineId)
-          .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime() || a.id.localeCompare(b.id)));
+          .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime() || a.id.localeCompare(b.id)).slice(0, take));
       },
     },
     task: {
