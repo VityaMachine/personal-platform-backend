@@ -56,6 +56,8 @@ model Task {
   subtasks                 Subtask[]
   areaId                   String?    @db.Uuid
   area                     Area?      @relation(fields: [areaId], references: [id], onDelete: Restrict)
+  routineOccurrenceId      String?    @unique @db.Uuid
+  routineOccurrence        RoutineOccurrence? @relation(fields: [routineOccurrenceId], references: [id], onDelete: Restrict)
 
   @@index([deletedAt, archivedAt, createdAt])
   @@index([areaId])
@@ -96,9 +98,27 @@ model Routine {
   area                     Area?        @relation(fields: [areaId], references: [id], onDelete: Restrict)
   subtasks                 RoutineSubtask[]
   actions                  RoutineAction[]
+  occurrences              RoutineOccurrence[]
 
   @@index([deletedAt, createdAt(sort: Desc), id])
   @@index([areaId])
+}
+
+model RoutineOccurrence {
+  id            String   @id @default(uuid()) @db.Uuid
+  routineId     String   @db.Uuid
+  occurrenceKey String
+  startDate     String   @db.VarChar(10)
+  endDate       String   @db.VarChar(10)
+  timezone      String   @db.VarChar(100)
+  localTime     String?  @db.VarChar(5)
+  instant       DateTime? @db.Timestamptz(3)
+  snapshot      Json
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  routine       Routine  @relation(fields: [routineId], references: [id], onDelete: Restrict)
+  task          Task?
+
+  @@unique([routineId, occurrenceKey])
 }
 
 model RoutineSubtask {

@@ -5,6 +5,9 @@ import { routineStateSchema, type CreateRoutineInput, type UpdateRoutineInput, t
 import { calculateRoutinePreview } from "./routines.preview";
 import { normalizePreviewHistory, PREVIEW_HISTORY_BUDGET } from "./routines.preview-history";
 import type { RoutinePreviewQuery } from "./routines.preview.schemas";
+import { calendarConfiguration, generationConflict, planRoutineGeneration, type GenerateRoutineInput } from "./routines.generate";
+import { createTaskWithSubtasks } from "../tasks/tasks.creation";
+import type { Prisma } from "../../generated/prisma/client";
 
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 export function createRoutinesService(repository: RoutinesRepository, now: () => Date = () => new Date()) {
@@ -15,10 +18,14 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
       throw error;
     }
   }
-  async function find(id: string, tx: RoutinesTransactionRepository) {
+  async function find(id: string, tx: RoutinesTransactionRepository, forGeneration = false) {
     const routine = await tx.findFirst(id);
     if (!routine) throw new ApiError(404, "Routine not found.");
-    return toRoutineResponse(routine);
+    try { return toRoutineResponse(routine); }
+    catch (error) {
+      if (forGeneration) generationConflict("Stored Routine configuration is invalid. Generation requires a valid schedule.");
+      throw error;
+    }
   }
   async function checkArea(areaId: string | null, tx: RoutinesTransactionRepository) {
     if (areaId && !await tx.findArea(areaId)) throw new ApiError(404, "Area not found.");
@@ -34,6 +41,40 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
   return {
     list() { return transaction(async (tx) => (await tx.findMany({ deletedAt: null })).map(toRoutineResponse)); },
     get(id: string) { return transaction((tx) => find(id, tx)); },
+    generate(id: string, range: GenerateRoutineInput) {
+      return transaction(async (tx) => {
+        // Area first, Routine second: consistent with Area deletion and area assignment.
+        const initial = await find(id, tx, true);
+        await checkArea(initial.areaId, tx);
+        await tx.lock(id);
+        const routine = await find(id, tx, true);
+        const candidates = planRoutineGeneration(routine, await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1), range);
+        const stored = candidates.length ? await tx.findOccurrences(id, candidates.map((entry) => entry.occurrenceKey)) : [];
+        const byKey = new Map(stored.map((entry) => [entry.occurrenceKey, entry]));
+        if (candidates.filter((entry) => !byKey.has(entry.occurrenceKey)).length > 100) {
+          generationConflict("Generation would create more than 100 new Tasks. Request a smaller range.");
+        }
+        if (stored.some((entry) => !entry.task)) generationConflict("Stored Routine occurrence has no Task. Generation requires repair.");
+        const created: { occurrenceKey: string; taskId: string }[] = [];
+        const existing: typeof created = [];
+        // All schedule, history, DST and volume validation finishes before the first write.
+        for (const candidate of candidates) {
+          const previous = byKey.get(candidate.occurrenceKey);
+          if (previous) { existing.push({ occurrenceKey: candidate.occurrenceKey, taskId: previous.task!.id }); continue; }
+          const { diagnostics: _diagnostics, ...calendar } = candidate;
+          const occurrence = await tx.createOccurrence({ ...calendar, routineId: id,
+            instant: calendar.instant === null ? null : new Date(calendar.instant),
+            snapshot: JSON.parse(JSON.stringify(routine)) as Prisma.InputJsonValue });
+          const { snapshot: _snapshot, createdAt: _createdAt, ...origin } = occurrence;
+          const task = await createTaskWithSubtasks(tx.tasks, {
+            title: routine.title, description: routine.description, priority: routine.priority,
+            estimatedDurationMinutes: routine.estimatedDurationMinutes, plannedAt: null, dueAt: null,
+          }, routine.subtasks, { area: routine.area, routineOccurrence: { ...origin, snapshot: occurrence.snapshot } });
+          created.push({ occurrenceKey: occurrence.occurrenceKey, taskId: task.id });
+        }
+        return { routineId: id, ...range, createdCount: created.length, existingCount: existing.length, created, existing };
+      });
+    },
     preview(id: string, query: RoutinePreviewQuery) {
       return transaction(async (tx) => {
         const routine = await find(id, tx);
@@ -76,6 +117,10 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
         // Validate the entire merged state before any writes, including overflow.
         const next = routineStateSchema.parse({ ...previous, ...patch });
         if (patch.areaId) await checkArea(patch.areaId, tx);
+        await tx.lock(id);
+        if (calendarConfiguration(previous) !== calendarConfiguration(next) && await tx.hasOccurrences(id)) {
+          generationConflict("Calendar configuration cannot change after generation. Create a new Routine; existing occurrences and Tasks are immutable snapshots.");
+        }
         const changed = !same(previous, next);
         const pauseChanged = paused !== undefined && paused !== Boolean(before.pausedAt);
         if (!changed && !pauseChanged) return before;
@@ -91,6 +136,7 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
     },
     remove(id: string) {
       return transaction(async (tx) => {
+        await tx.lock(id);
         const before = await find(id, tx);
         const after = toRoutineResponse(await tx.update(id, { deletedAt: now() }));
         await tx.createAction(id, "DELETED", { before, after });

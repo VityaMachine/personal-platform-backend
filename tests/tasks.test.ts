@@ -453,9 +453,10 @@ test("creation with subtasks returns the complete sorted DTO and only creation e
   assert.equal(result.status, 201);
   assert.equal(f.attempts(), 1);
   const parent = f.state().tasks[0];
+  const { routineOccurrenceId: _occurrenceId, ...parentDto } = JSON.parse(JSON.stringify(parent));
   const expectedChildren = JSON.parse(JSON.stringify([...f.state().subtasks].reverse()));
   assert.deepEqual(result.body, {
-    ...JSON.parse(JSON.stringify(parent)), area: null, isCompleted: false, subtasks: expectedChildren,
+    ...parentDto, routineOccurrence: null, area: null, isCompleted: false, subtasks: expectedChildren,
     summary: calculateTaskSummary(parent, f.state().actions, new Date(result.body.summary.asOf)),
   });
   assert.equal(result.body.title, "Update UI");
@@ -524,7 +525,7 @@ test("invalid nested creation and duration overflow fail before opening a transa
     assert.equal((await f.request("POST", "", data)).status, 400, JSON.stringify(data));
   }
   assert.equal(f.attempts(), 0);
-  assert.deepEqual(f.state(), { tasks: [], subtasks: [], actions: [], areas: [], routines: [], routineSubtasks: [], routineActions: [] });
+  assert.deepEqual(f.state(), { tasks: [], subtasks: [], actions: [], areas: [], routines: [], routineSubtasks: [], routineActions: [], occurrences: [] });
   const atLimit = await f.request("POST", "", {
     ...body, subtasks: [{ title: "Almost max", estimatedDurationMinutes: 2_147_483_646 }, { title: "Last", estimatedDurationMinutes: 1 }],
   });

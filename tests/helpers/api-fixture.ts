@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import type { TestContext } from "node:test";
 import express from "express";
 
-import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, type Area, type Routine, type RoutineSubtask, type RoutineAction } from "../../src/generated/prisma/client";
+import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, type Area, type Routine, type RoutineSubtask, type RoutineAction, type RoutineOccurrence } from "../../src/generated/prisma/client";
 import { errorHandler } from "../../src/middleware/error-handler";
 import { createRequestLogger } from "../../src/middleware/request-logger";
 import { createLogger } from "../../src/lib/logger";
@@ -26,7 +26,11 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   const tieSubtaskTimestamps = initialSubtaskIds.length > 0;
   let state: { tasks: Task[]; actions: TaskAction[]; subtasks: Subtask[]; areas: Area[];
     routines: Routine[]; routineSubtasks: RoutineSubtask[]; routineActions: RoutineAction[];
-  } = { tasks: [], actions: [], subtasks: [], areas: [], routines: [], routineSubtasks: [], routineActions: [] };
+    occurrences: RoutineOccurrence[];
+  } = { tasks: [], actions: [], subtasks: [], areas: [], routines: [], routineSubtasks: [], routineActions: [], occurrences: [] };
+  let revision = 0;
+  let occurrenceConflicts = 0;
+  let occurrencesBeforeFailure: number | undefined;
   let writesBeforeFailure: number | undefined;
   let conflicts = 0;
   let commitConflicts = 0;
@@ -40,16 +44,24 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   let deleteOnAssignmentConflict: string | undefined;
   let rawConflictCode = "P2034";
   const now = () => fixedTime ? new Date(fixedTime) : new Date();
-  const reads = { tasks: 0, subtasks: 0, history: 0, areas: 0, areaLocks: 0, routines: 0, routineHistory: 0 };
+  const reads = { tasks: 0, subtasks: 0, history: 0, areas: 0, areaLocks: 0, routines: 0, routineHistory: 0, occurrences: 0 };
   const operations: string[] = [];
   function taskResult(db: typeof state, task: Task, include?: Prisma.TaskInclude) {
     if (!include) return structuredClone(task);
     assert.deepEqual(include, {
       area: { select: { id: true, name: true } },
+      routineOccurrence: { select: { id: true, routineId: true, occurrenceKey: true, startDate: true, endDate: true,
+        timezone: true, localTime: true, instant: true } },
       subtasks: { where: { deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
     });
     return structuredClone({
       ...task,
+      routineOccurrence: (() => {
+        const occurrence = db.occurrences.find((entry) => entry.id === task.routineOccurrenceId);
+        if (!occurrence) return null;
+        const { snapshot: _snapshot, createdAt: _createdAt, ...fields } = occurrence;
+        return fields;
+      })(),
       area: (() => {
         const area = db.areas.find((area) => area.id === task.areaId);
         return area ? { id: area.id, name: area.name } : null;
@@ -71,6 +83,11 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   }
   const delegates = (db: typeof state) => ({
     async $queryRaw(strings: TemplateStringsArray, id: string) {
+      if (strings.join("?").includes('FROM "Routine"')) {
+        operations.push(`routine-lock:${id}`);
+        assert.match(strings.join("?"), /WHERE "id" = \?::uuid FOR UPDATE/);
+        return db.routines.filter((routine) => routine.id === id).map(({ id }) => ({ id }));
+      }
       reads.areaLocks++;
       operations.push(`area-lock:${id}`);
       assert.match(strings.join("?"), /FROM "Area" WHERE "id" = \?::uuid FOR UPDATE/);
@@ -100,6 +117,34 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
         });
       }
       return structuredClone(db.areas.filter((area) => area.id === id));
+    },
+    routineOccurrence: {
+      async findFirst({ where }: { where: { routineId: string } }) {
+        reads.occurrences++;
+        const entry = db.occurrences.find((entry) => entry.routineId === where.routineId);
+        return entry ? { id: entry.id } : null;
+      },
+      async findMany({ where }: { where: { routineId: string; occurrenceKey: { in: string[] } } }) {
+        reads.occurrences++;
+        return db.occurrences.filter((entry) => entry.routineId === where.routineId && where.occurrenceKey.in.includes(entry.occurrenceKey))
+          .map((entry) => ({ occurrenceKey: entry.occurrenceKey, task: (() => {
+            const task = db.tasks.find((task) => task.routineOccurrenceId === entry.id);
+            return task ? { id: task.id } : null;
+          })() }));
+      },
+      async create({ data }: { data: Omit<RoutineOccurrence, "id" | "createdAt"> }) {
+        operations.push(`occurrence-create:${data.routineId}`);
+        if (occurrencesBeforeFailure !== undefined && occurrencesBeforeFailure-- <= 0) throw new Error("Simulated occurrence write failure");
+        if (occurrenceConflicts-- > 0 || db.occurrences.some((entry) => entry.routineId === data.routineId && entry.occurrenceKey === data.occurrenceKey)) {
+          throw new Prisma.PrismaClientKnownRequestError("Duplicate occurrence", {
+            code: "P2002", clientVersion: "7.10.1", meta: { target: ["routineId", "occurrenceKey"] },
+          });
+        }
+        assert.ok(db.routines.some((routine) => routine.id === data.routineId));
+        const entry = { ...data, id: randomUUID(), createdAt: now() };
+        db.occurrences.push(entry);
+        return structuredClone(entry);
+      },
     },
     area: {
       async findMany({ orderBy }: { orderBy: unknown }) {
@@ -207,9 +252,19 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
           .map((task) => taskResult(db, task, include));
       },
       async create({ data }: { data: Partial<Task> }) {
+        if (taskWritesBeforeFailure !== undefined && taskWritesBeforeFailure-- <= 0) throw new Error("Simulated task write failure");
+        if (data.routineOccurrenceId) {
+          assert.ok(db.occurrences.some((entry) => entry.id === data.routineOccurrenceId));
+          if (db.tasks.some((task) => task.routineOccurrenceId === data.routineOccurrenceId)) {
+            throw new Prisma.PrismaClientKnownRequestError("Duplicate Task occurrence", {
+              code: "P2002", clientVersion: "7.10.1", meta: { target: ["routineOccurrenceId"] },
+            });
+          }
+        }
         const task: Task = {
           id: randomUUID(), title: "", description: null, status: "TODO", priority: "MEDIUM",
           areaId: null,
+          routineOccurrenceId: null,
           plannedAt: null, dueAt: null, estimatedDurationMinutes: 1,
           cancellationNote: null, archivedAt: null, deletedAt: null,
           createdAt: now(), updatedAt: now(), ...data,
@@ -283,9 +338,12 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
       attempts++;
       if (conflicts-- > 0) throw new Prisma.PrismaClientKnownRequestError("Conflict", { code: "P2034", clientVersion: "7.10.1" });
       const draft = structuredClone(state);
+      const baseRevision = revision;
       const result = await work(delegates(draft));
       if (commitConflicts-- > 0) throw new Prisma.PrismaClientKnownRequestError("Commit conflict", { code: "P2034", clientVersion: "7.10.1" });
+      if (baseRevision !== revision) throw new Prisma.PrismaClientKnownRequestError("Concurrent commit", { code: "P2034", clientVersion: "7.10.1" });
       state = draft;
+      revision++;
       return result;
     },
   } as unknown as PrismaClient;
@@ -318,6 +376,8 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   return {
     request, areaRequest, routineRequest, logs, reads, operations, state: () => state, setTime: (time: Date) => { fixedTime = time; },
     failRoutineWrites: (after = 0) => { routineWritesBeforeFailure = after; },
+    occurrenceConflicts: (count: number) => { occurrenceConflicts = count; },
+    failOccurrences: (after = 0) => { occurrencesBeforeFailure = after; },
     failRoutineChildren: (after = 0) => { routineChildrenBeforeFailure = after; },
     deleteOnAssignmentConflict: (id: string, code = "P2034") => { deleteOnAssignmentConflict = id; rawConflictCode = code; },
     failTaskWrites: (after = 0) => { taskWritesBeforeFailure = after; },

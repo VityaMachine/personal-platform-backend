@@ -10,6 +10,7 @@ import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./tasks.s
 import { createSubtasksService } from "./subtasks.service";
 import { calculateTaskSummary } from "./tasks.summary";
 import { toAreaSnapshot } from "../areas/areas.mapper";
+import { createTaskWithSubtasks } from "./tasks.creation";
 
 export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
   async function assignableArea(id: string | null | undefined, tx: TasksTransactionRepository) {
@@ -61,13 +62,8 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
       const { subtasks = [], ...fields } = data;
       return transaction(async (tx) => {
         const area = await assignableArea(fields.areaId, tx);
-        const created = await tx.create({ ...fields, areaId: fields.areaId ?? null, plannedAt: fields.plannedAt ?? null });
-        await tx.createAction(created.id, "CREATED", { before: null, after: { ...created, area: toAreaSnapshot(area) } });
-        for (const subtask of subtasks) {
-          const child = await tx.createSubtask(created.id, { ...subtask, status: "TODO" });
-          await tx.createAction(created.id, "SUBTASK_CREATED", { subtaskId: child.id, before: null, after: child });
-        }
-        const task = subtasks.length ? await findTask(created.id, tx) : { ...created, area, subtasks: [] };
+        const created = await createTaskWithSubtasks(tx, fields, subtasks, { area });
+        const task = subtasks.length ? await findTask(created.id, tx) : { ...created, area, subtasks: [], routineOccurrence: null };
         return (await summarize([task], tx))[0];
       });
     },

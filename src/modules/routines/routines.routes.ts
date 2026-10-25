@@ -5,6 +5,7 @@ import { createRoutinesRepository } from "./routines.repository";
 import { createRoutineSchema, routineIdSchema, routineQuerySchema, updateRoutineSchema } from "./routines.schemas";
 import { createRoutinesService } from "./routines.service";
 import { routinePreviewQuerySchema } from "./routines.preview.schemas";
+import { generateRoutineSchema } from "./routines.generate";
 
 const route = <Locals extends Record<string, unknown>>(
   handler: (request: Request, response: Response<unknown, Locals>) => Promise<void>,
@@ -30,6 +31,9 @@ export function createRoutinesRouter(client?: () => PrismaClient, now?: () => Da
   router.use(validateQuery);
   router.get("/", route(controller.list));
   router.post("/", validateCreate, route(controller.create));
+  router.post("/:id/generate", validateId, (request, response, next) => {
+    response.locals.body = generateRoutineSchema.parse(request.body); next();
+  }, route(controller.generate));
   router.get("/:id/history", validateId, route(controller.history));
   router.get("/:id", validateId, route(controller.get));
   router.patch("/:id", validateId, validateUpdate, route(controller.update));

@@ -466,9 +466,10 @@ nullable `Task.areaId`, FK з `ON DELETE RESTRICT`, індекс `Task_areaId_id
 
 ## Routines — шаблони повторюваних задач
 
-**Збереження Routine поки не створює жодного Task.** Генерації виконань, cron,
-`isToday` та frontend немає. Read-only preview розраховує календарні виконання,
-не створюючи Task, RoutineAction або інших записів.
+**Збереження Routine не створює жодного Task.** Генерація календарних виконань
+запускається лише явним POST `/api/routines/:id/generate`. Cron, автоматичних
+запусків із GET, `isToday` та frontend немає. Read-only preview розраховує календарні
+виконання, не створюючи Task, RoutineAction або інших записів.
 
 | Метод і маршрут | Результат |
 | --- | --- |
@@ -479,6 +480,7 @@ nullable `Task.areaId`, FK з `ON DELETE RESTRICT`, індекс `Task_areaId_id
 | `DELETE /api/routines/:id` | `204`, м'яке видалення без body |
 | `GET /api/routines/:id/history` | `200`, окремий журнал RoutineAction |
 | `GET /api/routines/:id/preview?from=YYYY-MM-DD&to=YYYY-MM-DD` | `200`, проєкція поточного розкладу |
+| `POST /api/routines/:id/generate` | `200`, атомарна генерація до 100 нових Task |
 
 Список: `createdAt DESC`, потім `id ASC`. Query-параметри дозволені лише для preview.
 Невідомі поля й порожній PATCH відхиляються. Невалідні ID/body/query — `400`,
@@ -601,7 +603,7 @@ Timezone database використовує ICU Node.js, а не системни
 Максимум 366 календарних днів включно (наприклад, 2026-01-01–2027-01-01).
 `limit` — ціле 1–500, default 100. Невідомі, повторені або невалідні query-поля
 та невалідний UUID → `400`; відсутній або видалений шаблон → `404`.
-Деталі й history залишаються на чинних маршрутах, звичайний Task DTO не змінений.
+Деталі й history залишаються на чинних маршрутах; preview не додає власних полів до Task DTO.
 
 Відповідь — `{ routineId, timezone, from, to, occurrences, truncated, limitations }`.
 Приклад елемента для шаблону «Масаж» із POST нижче:
@@ -629,7 +631,7 @@ Timezone database використовує ICU Node.js, а не системни
 `occurrenceKey` використовує ID Routine та календарний період/вибір вікна
 (для AFTER_COMPLETION — номер і дату); він не залежить від from/to, limit чи
 випадкового UUID. Це ключ календарного виконання, не остаточний механізм
-захисту майбутньої генерації Task від дублікатів у БД.
+захисту генерації Task від дублікатів у БД: для цього є окремі unique constraints.
 
 `localTime: null` означає all-day: `instant: null`, без UTC-півночі.
 Для заданого localTime `instant` — запланований початок на **першій даті вікна
@@ -838,8 +840,206 @@ TaskAction не використовується для шаблонів. Спі
 без очищення даних чи редагування старих міграцій. Вона не застосовувалась у цьому
 кроці. Для ручної перевірки БД має окремо отримати цю міграцію.
 Тести використовують спільний підставний Prisma та локальний HTTP-сервер;
-реальні блокування PostgreSQL і виконання SQL-міграції не перевірені. Тести
-валідації та календарних helpers не є перевіркою генерації: генерації зараз немає.
+вони перевіряють preview, CRUD та журнал. Окремий opt-in тест генерації нижче
+перевіряє також реальні constraints, транзакції й конкурентні HTTP-запити на PostgreSQL.
+
+### Явна генерація календарних Task
+
+`POST {{baseUrl}}/api/routines/{{routineId}}/generate`, Body → raw → JSON:
+
+```json
+{
+  "from": "2026-10-25",
+  "to": "2026-11-07"
+}
+```
+
+Лише ці два обов'язкові поля: локальні ISO-дати включно, from <= to, не більше
+366 календарних днів включно. Query, limit, completedAt та completedOccurrenceNumber
+у цьому API не підтримуються. Невалідний UUID/body → `400`, відсутня/видалена
+Routine → `404`. Поточна пауза, AFTER_COMPLETION, недостовірна історія/COUNT,
+unresolved DST, вичерпаний бюджет або понад 100 **нових** задач → `409` із безпечним
+`error.message`. Весь запит відхиляється до записів; перші 100 мовчки не створюються.
+
+Відповідь `200` містить лише посилання, без повних Task DTO:
+
+```json
+{
+  "routineId": "<routineId>",
+  "from": "2026-10-25",
+  "to": "2026-11-07",
+  "createdCount": 1,
+  "existingCount": 0,
+  "created": [
+    { "occurrenceKey": "v1:<routineId>:daily:2026-10-25", "taskId": "<taskId>" }
+  ],
+  "existing": []
+}
+```
+
+Розрахунок повторно використовує чистий модуль preview, його прив'язку до startDate,
+COUNT від початку, короткі місяці та правило пауз `[pauseDate, resumeDate)`.
+Діапазон включає виконання за перетином вікна, зберігаються **повні** межі вікна.
+`CURRENT_CONFIGURATION_PROJECTION` саме по собі дозволене; інші невирішені
+limitations, крім узгодженого `CONFIGURATION_CHANGED` для не-COUNT, блокують запит.
+Перевіряються всі кандидати та їхні DST diagnostics, навіть якщо вони вже існують.
+All-day із instant=null є коректним. Максимум результатів внутрішнього розрахунку —
+500 (календарний діапазон до 366 днів); будь-який truncated також блокує генерацію.
+
+Для достовірності перевіряється ланцюжок schedule/timezone/startDate/endCondition
+та pausedAt у snapshots журналу до поточного стану. Ідентичні UPDATED та
+PAUSED/RESUMED однієї мутації враховуються разом; неоднозначні зміни з однаковим
+timestamp відхиляються. Узгоджений журнал без sequence/version все одно не дозволяє
+виявити всі зовнішні пропуски або ручні зміни БД; історія, записана API, є джерелом
+для генерації. При видимій неповноті генерація не робить припущень.
+
+**Явне правило першої версії:** після першого збереженого RoutineOccurrence реальні
+зміни `schedule`, `timezone`, `startDate` чи `endCondition` у PATCH → `409`.
+Потрібно створити нову Routine. Це захищає від нового виконання того самого періоду
+через зміну конфігурації без реалізації версій розкладу та зіставлення періодів між
+версіями. Ідентичний PATCH дозволений. Назва, опис, пріоритет, сфера, тривалість,
+шаблони підзадач і пауза редагуються; збережені occurrence та Task не переписуються.
+Пауза також не скасовує і не видаляє вже створених задач. existing містить лише
+кандидатів поточного розрахунку, а не всі колись збережені виконання Routine.
+
+До першої генерації календар можна змінювати. Для не-COUNT визначається дата
+останньої релевантної зміни з RoutineAction у поточному timezone Routine.
+Генерація дозволена лише для вікон, що починаються **після** цієї локальної дати.
+День зміни також консервативно виключений, навіть якщо localTime ще попереду:
+так не застосовується новий розклад до календарного вікна, що вже почалося.
+Запит із хоча б одним ранішим кандидатом відхиляється повністю; його межі не
+зсуваються мовчки. CREATED не є зміною конфігурації: початковий шаблон може мати
+startDate у минулому. COUNT після релевантних змін залишається невизначеним за
+контрактом preview і потребує нової Routine, навіть до першої генерації.
+
+RoutineOccurrence містить UUID, routineId, occurrenceKey, локальні startDate/endDate,
+timezone, nullable localTime/instant, повний snapshot Routine на момент генерації
+та createdAt. `UNIQUE(routineId, occurrenceKey)` виключає дублікати календарних
+виконань. Nullable `Task.routineOccurrenceId` має UNIQUE та FK RESTRICT, тому
+одному виконанню відповідає максимум одна Task. У звичайних задач зв'язок відсутній.
+API фізичного видалення occurrence немає. Soft delete Task зберігає зв'язок;
+повторний POST повертає той самий taskId у existing, не відновлює й не замінює задачу.
+Її звичайний GET далі повертає `404`. DONE/архівування також не створюють заміни.
+
+Усі нові Task і копії підзадач створюються в TODO зі своїми UUID. Копіюються назва,
+опис, пріоритет і сфера; з дітьми тривалість є сумою шаблонів. plannedAt і dueAt
+початково null: це особистий план/дедлайн, а календарні межі зберігаються в occurrence.
+Звичайний POST `/api/tasks` усе ще вимагає dueAt. Обидва шляхи використовують
+спільну доменну функцію створення Task/Subtasks та CREATED/SUBTASK_CREATED.
+CREATED містить `origin: { type: "ROUTINE", routineId }` і `routineOccurrence`
+зі знімком календарного виконання та його конфігурації. Summary відраховується
+від фактичного createdAt Task, навіть якщо startDate виконання була в минулому.
+
+Усі повні Task DTO додають поле:
+
+```json
+{
+  "routineOccurrence": {
+    "id": "<occurrenceId>",
+    "routineId": "<routineId>",
+    "occurrenceKey": "v1:<routineId>:daily:2026-10-25",
+    "startDate": "2026-10-25",
+    "endDate": "2026-10-25",
+    "timezone": "Europe/Kyiv",
+    "localTime": "18:00",
+    "instant": "2026-10-25T16:00:00.000Z"
+  }
+}
+```
+
+Для звичайної Task це null. area, subtasks, summary, isCompleted та інші чинні
+поля збережені. Зв'язок завантажується разом із Task через include, без N+1;
+великий snapshot конфігурації до Task DTO не потрапляє.
+
+Усі occurrence, Task, діти й події одного POST — одна Serializable-транзакція
+із трьома спробами та timeout 30 секунд. Блокування Area → Routine узгоджене
+з призначенням/видаленням Area; PATCH, пауза й DELETE Routine беруть той самий
+lock Routine. Унікальні конфлікти виконання та serialization/deadlock конфлікти
+повторюють всю операцію; після вичерпання повертається безпечний `409`, без сирих
+Prisma-помилок. Повтор після втраченого успішного HTTP response також ідемпотентний.
+
+### Postman: генерація «Масаж» та місячного вікна
+
+Створіть «Масаж» точним POST із прикладу вище, збережіть його id як `massageRoutineId`.
+
+```http
+POST {{baseUrl}}/api/routines/{{massageRoutineId}}/generate
+Content-Type: application/json
+```
+
+```json
+{ "from": "2026-10-25", "to": "2026-11-07" }
+```
+
+Перший запит: createdCount=7, existingCount=0. Дати: 25, 27, 29, 31 жовтня;
+2, 4, 6 листопада. Той самий POST повторно: createdCount=0, existingCount=7
+із тими самими taskId. GET `/api/tasks/<taskId>` показує occurrence та null у plannedAt/dueAt.
+
+Для «Передати показники» створіть окрему Routine:
+
+```http
+POST {{baseUrl}}/api/routines
+Content-Type: application/json
+```
+
+```json
+{
+  "title": "Передати показники",
+  "estimatedDurationMinutes": 10,
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-11-01",
+  "schedule": {
+    "version": 1,
+    "recurrence": {
+      "type": "MONTHLY",
+      "intervalMonths": 1,
+      "selection": { "type": "WINDOW", "startDay": 15, "endDay": 23, "shortMonthPolicy": "SKIP" }
+    },
+    "localTime": null
+  },
+  "endCondition": { "type": "NEVER" }
+}
+```
+
+Збережіть id як `meterRoutineId`:
+
+```http
+POST {{baseUrl}}/api/routines/{{meterRoutineId}}/generate
+Content-Type: application/json
+```
+
+```json
+{ "from": "2026-11-20", "to": "2026-11-21" }
+```
+
+Перша генерація створить одну Task з occurrence 2026-11-15–2026-11-23 включно,
+localTime=null, instant=null. Повтор за 2026-11-01–2026-11-30 поверне той самий
+taskId у existing. Після DELETE задачі повторний generate усе ще повертає її ID,
+а GET задачі → 404. Пауза шаблону → generate 409; відновлення знову дозволяє
+генерацію за узгодженим журналом. GET preview та history нічого не генерують.
+
+### Міграція й інтеграційні перевірки генерації
+
+Нова `20261025120000_routine_occurrences` додає таблицю, nullable FK Task та
+унікальні індекси, в одній SQL-транзакції, без очищення даних. Старі міграції не
+редаговані. Вона перевірена лише на ізольованому локальному PostgreSQL 17;
+до Supabase не підключались, production-міграцію не застосовували.
+
+Звичайні HTTP-тести використовують чинний підставний Prisma, моделюють також
+конкурентні commits та конфлікти unique. Opt-in `tests/routines-postgres.test.ts`
+перевіряє збереження наявної Task при новій міграції, реальні unique/FK constraints,
+два конкурентні POST, гонки з паузою/конфігурацією/видаленням Routine та Area,
+і відкат усього набору через реальну помилку PostgreSQL trigger у журналі.
+Тест створює й після завершення видаляє **лише власну нову випадкову schema**;
+усі старі міграції запускає тільки в ній. Дозволено лише localhost/127.0.0.1/::1.
+DATABASE_URL, DIRECT_URL і credentials із .env для цього тесту не використовуються.
+Без ROUTINE_TEST_DATABASE_URL він явно skipped:
+
+```powershell
+$env:ROUTINE_TEST_DATABASE_URL = 'postgresql://test_user:test_password@127.0.0.1:15432/test_database'
+npx.cmd tsx --test tests/routines-postgres.test.ts
+Remove-Item Env:ROUTINE_TEST_DATABASE_URL
+```
 
 ## Логування HTTP-запитів
 

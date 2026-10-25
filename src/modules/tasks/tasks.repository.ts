@@ -4,6 +4,8 @@ import { lockArea } from "../../lib/area-lock";
 
 const taskInclude = {
   area: { select: { id: true, name: true } },
+  routineOccurrence: { select: { id: true, routineId: true, occurrenceKey: true, startDate: true, endDate: true,
+    timezone: true, localTime: true, instant: true } },
   subtasks: {
     where: { deletedAt: null },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -12,7 +14,7 @@ const taskInclude = {
 
 export type TaskWithSubtasks = Prisma.TaskGetPayload<{ include: typeof taskInclude }>;
 
-function createTaskQueries(db: Prisma.TransactionClient) {
+export function createTaskQueries(db: Prisma.TransactionClient) {
   return {
     findMany(where: Prisma.TaskWhereInput) {
       return db.task.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }], include: taskInclude });
