@@ -482,9 +482,10 @@ Task, як описано нижче. Read-only preview розраховує к�
 | `DELETE /api/routines/:id` | `204`, м'яке видалення без body |
 | `GET /api/routines/:id/history` | `200`, окремий журнал RoutineAction |
 | `GET /api/routines/:id/preview?from=YYYY-MM-DD&to=YYYY-MM-DD` | `200`, проєкція поточного розкладу |
+| `GET /api/routines/:id/generation-preview?from=YYYY-MM-DD&to=YYYY-MM-DD` | `200`, фактично допустимі кандидати generate за збереженим станом |
 | `POST /api/routines/:id/generate` | `200`, до 100 нових календарних Task або одного AFTER_COMPLETION наступника |
 
-Список: `createdAt DESC`, потім `id ASC`. Query-параметри дозволені лише для preview.
+Список: `createdAt DESC`, потім `id ASC`. Query-параметри дозволені лише для preview та generation-preview.
 Невідомі поля й порожній PATCH відхиляються. Невалідні ID/body/query — `400`,
 відсутня/видалена Routine або сфера при призначенні — `404`; вичерпані повтори
 конфлікту транзакції — `409`. Формат помилок і request logging спільні з іншими
@@ -856,8 +857,9 @@ TaskAction не використовується для шаблонів. Спі
 }
 ```
 
-Лише ці два обов'язкові поля: локальні ISO-дати включно, from <= to, не більше
-366 календарних днів включно. Query, limit, completedAt та completedOccurrenceNumber
+from/to — два обов'язкові поля: локальні ISO-дати включно, from <= to, не більше
+366 календарних днів включно. Додатково дозволений необов'язковий planning, описаний
+нижче. Query, limit, completedAt та completedOccurrenceNumber
 у цьому API не підтримуються. Невалідний UUID/body → `400`, відсутня/видалена
 Routine → `404`. Поточна пауза, недостовірна історія/COUNT,
 unresolved DST, вичерпаний бюджет або понад 100 **нових** задач → `409` із безпечним
@@ -924,8 +926,9 @@ API фізичного видалення occurrence немає. Soft delete Tas
 Її звичайний GET далі повертає `404`. DONE/архівування також не створюють заміни.
 
 Усі нові Task і копії підзадач створюються в TODO зі своїми UUID. Копіюються назва,
-опис, пріоритет і сфера; з дітьми тривалість є сумою шаблонів. plannedAt і dueAt
-початково null: це особистий план/дедлайн, а календарні межі зберігаються в occurrence.
+опис, пріоритет і сфера; з дітьми тривалість є сумою шаблонів. dueAt початково null;
+plannedAt також null, якщо для нового виконання не передано planning. Це особистий
+план/дедлайн, а календарні межі зберігаються в occurrence.
 Звичайний POST `/api/tasks` усе ще вимагає dueAt. Обидва шляхи використовують
 спільну доменну функцію створення Task/Subtasks та CREATED/SUBTASK_CREATED.
 CREATED містить `origin: { type: "ROUTINE", routineId }` і `routineOccurrence`
@@ -963,9 +966,171 @@ lock Routine. Унікальні конфлікти виконання та seri
 повторюють всю операцію; після вичерпання повертається безпечний `409`, без сирих
 Prisma-помилок. Повтор після втраченого успішного HTTP response також ідемпотентний.
 
+### Planning нових Task під час generate
+
+`POST /api/routines/:id/generate` адитивно приймає необов'язковий масив:
+
+```json
+{
+  "from": "2026-10-25",
+  "to": "2026-11-07",
+  "planning": [
+    {
+      "occurrenceKey": "v1:<routineId>:daily:2026-10-25",
+      "plannedAt": "2026-10-25T16:00:00+02:00"
+    }
+  ]
+}
+```
+
+Старий body без planning та planning=[] еквівалентні. Запис planning має рівно
+occurrenceKey (непорожній рядок до 512 символів) та plannedAt (валідний ISO timestamp
+із Z або явним offset; null і дата без часу не приймаються). Timestamp зберігається
+як UTC instant: наведений приклад → `2026-10-25T14:00:00.000Z`.
+Максимум 100 записів для календарного режиму, максимум 1 для AFTER_COMPLETION —
+відповідно до чинного максимального обсягу нової генерації. Дублікати ключів,
+зайві поля, невалідні timestamps і перевищення ліміту planning → `400`.
+
+Кожен ключ перевіряється за **результатом поточного resolver для цієї Routine та
+діапазону**. Сам рядок не є дозволом отримати довільну Task; клієнтські ключі не
+використовуються для пошуку чужих задач. Невідомий, чужий, поза діапазоном або
+більше не допустимий ключ → `400` до будь-якого запису, відхиляється весь набір.
+Перевірки пауз, COUNT, DST, історії, бюджетів та ліміту нових Task залишаються
+чинними і можуть блокувати сам resolver через `409`.
+
+План застосовується **лише при створенні нової Task**. Нові виконання без запису
+в planning отримують plannedAt=null. plannedAt може бути поза вікном — це явний
+особистий план. schedule, localTime, instant, межі occurrence, dueAt та Routine
+не переписуються; план не розв'язує DST-проблем самого розкладу.
+Спільна доменна функція створення Task отримує plannedAt одразу: CREATED.snapshot
+(`metadata.after`) містить фактичний plannedAt, штучної EDITED після створення немає.
+Summary відраховується від createdAt Task, а не від plannedAt чи дати occurrence.
+
+Existing, включно з DONE і soft-deleted, повертаються з тими самими taskId; їхній
+plannedAt та журнал не змінюються навіть при іншому planning у повторному POST.
+Подальше перепланування робиться через чинний PATCH `/api/tasks/:id`. При двох
+конкурентних POST із різними планами перемагає транзакція, яка створила виконання;
+після retry інша повертає existing і не перезаписує її план. Валідація всього map,
+occurrence, Task, копії підзадач та журнал — одна атомарна транзакція.
+Формат успішної відповіді created/existing не змінений; planning у відповідь не додається.
+
+### Generation-preview: фактичні кандидати перед POST
+
+```http
+GET {{baseUrl}}/api/routines/{{routineId}}/generation-preview?from=2026-10-25&to=2026-11-07
+```
+
+from/to обов'язкові, локальні ISO-дати включно, максимум 366 днів. Інші query-поля
+(включно з planning, limit, completedAt і completedOccurrenceNumber) → `400`.
+Невалідний UUID → `400`, відсутня/видалена Routine → `404`. Поточна пауза та
+будь-які доменні перешкоди generate → той самий `409`, без часткового списку.
+Зокрема діапазон із понад 100 новими календарними Task треба зменшити також для
+generation-preview. Це відрізняється від simulation preview з власним limit.
+
+Приклад відповіді (нижче один елемент; фактичний масив містить усіх кандидатів):
+
+```json
+{
+  "routineId": "<routineId>",
+  "timezone": "Europe/Kyiv",
+  "from": "2026-10-25",
+  "to": "2026-11-07",
+  "occurrences": [
+    {
+      "occurrenceKey": "v1:<routineId>:daily:2026-10-25",
+      "startDate": "2026-10-25",
+      "endDate": "2026-10-25",
+      "timezone": "Europe/Kyiv",
+      "localTime": "18:00",
+      "instant": "2026-10-25T16:00:00.000Z",
+      "diagnostics": [],
+      "existing": false
+    }
+  ]
+}
+```
+
+GET використовує **той самий resolver кандидатів**, що POST: для AFTER_COMPLETION
+завершення й номер беруться виключно зі збереженого ланцюжка та TaskAction.
+Повертається максимум один новий наступник, без прогнозування наступних завершень.
+Existing визначаються за чинними правилами повтору; для них повертаються збережені
+календарні дані та existing=true. taskId, plannedAt, статус, назва й інший вміст
+Task не розкриваються, зокрема для м'яко видалених задач.
+
+Жодних записів, генерації або подій у GET немає. Читання виконується в
+Serializable-транзакції з тим самим порядком SELECT locks Area → Routine → Task
+для узгодженого snapshot. Вміст наявного `/preview` не змінено: він лишається
+read-only симуляцією з необов'язковим **клієнтським** completion-контекстом.
+
+Відповідь generation-preview — **знімок, не резервування**. POST знову читає й
+перевіряє стан у своїй транзакції. Якщо planning-ключ більше не входить у допустимий
+результат за цим діапазоном, відповідь `400` з повідомленням
+`Refresh generation-preview and retry.` — оновіть GET, ключі та повторіть POST.
+Якщо стан тепер блокує саму генерацію (наприклад, reopen, пауза чи невизначене
+завершення), повертається `409`; також слід оновити preview після усунення причини.
+План ніколи не переноситься на інший ключ. Якщо цей ключ уже existing, його план
+ігнорується за правилами retry; нові виконання без власного запису planning мають null.
+
+Точний Postman-сценарій часткового планування «Масаж»:
+
+1. Виконайте GET generation-preview вище для massageRoutineId і скопіюйте три
+   occurrenceKey за 25, 29 жовтня та 6 листопада.
+2. `POST {{baseUrl}}/api/routines/{{massageRoutineId}}/generate`, raw JSON:
+
+```json
+{
+  "from": "2026-10-25",
+  "to": "2026-11-07",
+  "planning": [
+    { "occurrenceKey": "v1:{{massageRoutineId}}:daily:2026-10-25", "plannedAt": "2026-10-25T16:00:00+02:00" },
+    { "occurrenceKey": "v1:{{massageRoutineId}}:daily:2026-10-29", "plannedAt": "2026-10-29T19:45:00+05:45" },
+    { "occurrenceKey": "v1:{{massageRoutineId}}:daily:2026-11-06", "plannedAt": "2026-12-20T09:00:00-05:00" }
+  ]
+}
+```
+
+Для нового шаблону створиться 7 Task: у трьох plannedAt відповідно
+`2026-10-25T14:00:00.000Z`, `2026-10-29T14:00:00.000Z`, `2026-12-20T14:00:00.000Z`,
+у решти — null; dueAt у всіх null. Останній план навмисно поза вікном.
+Повтор із іншими plannedAt поверне existing і не змінить Task або CREATED.
+
+Для AFTER_COMPLETION після реального DONE останньої Task отримайте наступника:
+
+```http
+GET {{baseUrl}}/api/routines/{{completionRoutineId}}/generation-preview?from=2026-10-26&to=2026-11-07
+```
+
+Post-response script для копіювання фактично доступного нового ключа:
+
+```javascript
+pm.environment.unset("nextOccurrenceKey");
+const candidate = pm.response.json().occurrences.find(o => !o.existing);
+if (candidate) pm.environment.set("nextOccurrenceKey", candidate.occurrenceKey);
+```
+
+Якщо нового кандидата немає, planning для наступника не надсилайте. Інакше:
+
+```http
+POST {{baseUrl}}/api/routines/{{completionRoutineId}}/generate
+```
+
+```json
+{
+  "from": "2026-10-26",
+  "to": "2026-11-07",
+  "planning": [
+    { "occurrenceKey": "{{nextOccurrenceKey}}", "plannedAt": "2026-11-01T09:00:00+02:00" }
+  ]
+}
+```
+
+Номер і completedAt клієнт не задає. Якщо остання Task ще не DONE та в діапазоні
+немає existing, GET поверне 409 за чинним правилом очікування завершення.
+
 ### AFTER_COMPLETION: генерація зі збереженого завершення
 
-Той самий POST `/api/routines/:id/generate` і строгий body `{ from, to }`, той самий
+Той самий POST `/api/routines/:id/generate` і body `{ from, to }` з необов'язковим
+planning, описаним вище, той самий
 формат created/existing. Клієнт **не передає** completedAt чи номер виконання:
 ці поля в generate дають `400`. Контекст GET preview залишається окремим read-only
 моделюванням і ніколи не стає фактом завершення. GET та перехід Task у DONE самі
@@ -1209,6 +1374,13 @@ taskId у existing. Після DELETE задачі повторний generate �
 і повний відкат наступника після помилки журналу підзадачі. Більша матриця
 дат/DST, COUNT/UNTIL_DATE, пауз, статусів і пошкодженої історії перевіряється
 підставним Prisma у `tests/routines-completion.test.ts`.
+Для planning на реальному PostgreSQL перевірені конкурентні календарні та
+AFTER_COMPLETION POST із різними планами, незмінність плану й CREATED переможця
+після retry, відсутність записів у generation-preview та відкат batch із planning
+при помилці журналу. Часткове планування, offsets, невалідні/чужі ключі, межі
+діапазону, застарілий preview, DST та інші негативні випадки перевіряються чинним
+підставним Prisma у `tests/routines-planning.test.ts`. Це локальні інтеграційні
+перевірки, а не перевірка production/Supabase або всіх можливих interleavings.
 Тест створює й після завершення видаляє **лише власну нову випадкову schema**;
 усі старі міграції запускає тільки в ній. Дозволено лише localhost/127.0.0.1/::1.
 DATABASE_URL, DIRECT_URL і credentials із .env для цього тесту не використовуються.

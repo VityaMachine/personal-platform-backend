@@ -92,6 +92,33 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   assert.equal(repeated.body.createdCount, 0); assert.equal(repeated.body.existingCount, 7);
   assert.equal((await request("GET", `/tasks/${occurrence.task!.id}`)).status, 404);
 
+  const plannedRoutine = (await request("POST", "/routines", input)).body;
+  const beforePreviewCounts = { tasks: await prisma.task.count(), occurrences: await prisma.routineOccurrence.count(), actions: await prisma.taskAction.count() };
+  const plannedPreview = await request("GET", `/routines/${plannedRoutine.id}/generation-preview?from=2026-10-25&to=2026-10-25`);
+  assert.equal(plannedPreview.status, 200); assert.equal(plannedPreview.body.occurrences[0].existing, false);
+  assert.deepEqual({ tasks: await prisma.task.count(), occurrences: await prisma.routineOccurrence.count(), actions: await prisma.taskAction.count() }, beforePreviewCounts);
+  const plans = ["2026-12-01T16:00:00+02:00", "2026-12-02T09:00:00-05:00"];
+  const plannedKey = plannedPreview.body.occurrences[0].occurrenceKey;
+  const plannedRequests = await Promise.all(plans.map((plannedAt) => request("POST", `/routines/${plannedRoutine.id}/generate`, {
+    from: "2026-10-25", to: "2026-10-25", planning: [{ occurrenceKey: plannedKey, plannedAt }],
+  })));
+  assert.ok(plannedRequests.every((response) => response.status === 200), JSON.stringify(plannedRequests));
+  assert.deepEqual(plannedRequests.map((response) => response.body.createdCount).sort(), [0, 1]);
+  const planWinner = plannedRequests.findIndex((response) => response.body.createdCount === 1);
+  const plannedTaskId = plannedRequests[planWinner].body.created[0].taskId;
+  const plannedTask = await prisma.task.findUniqueOrThrow({ where: { id: plannedTaskId } });
+  assert.equal(plannedTask.plannedAt!.toISOString(), new Date(plans[planWinner]).toISOString());
+  const plannedEvent = await prisma.taskAction.findFirstOrThrow({ where: { taskId: plannedTaskId, type: "CREATED" } });
+  assert.equal((plannedEvent.metadata as { after: { plannedAt: string } }).after.plannedAt, plannedTask.plannedAt!.toISOString());
+  assert.equal(await prisma.taskAction.count({ where: { taskId: plannedTaskId } }), 1);
+  const plannedRetry = await request("POST", `/routines/${plannedRoutine.id}/generate`, {
+    from: "2026-10-25", to: "2026-10-25", planning: [{ occurrenceKey: plannedKey, plannedAt: "2027-01-01T00:00:00Z" }],
+  });
+  assert.equal(plannedRetry.body.createdCount, 0); assert.equal(plannedRetry.body.existing[0].taskId, plannedTaskId);
+  assert.deepEqual(await prisma.task.findUniqueOrThrow({ where: { id: plannedTaskId } }), plannedTask);
+  const privatePreview = await request("GET", `/routines/${r.id}/generation-preview?from=${range.from}&to=${range.to}`);
+  assert.ok(privatePreview.body.occurrences.every((entry: { existing: boolean; taskId?: string; title?: string }) => entry.existing && entry.taskId === undefined && entry.title === undefined));
+
   // A real PostgreSQL trigger fails the fourth CREATED write, after three complete Task inserts.
   await sql.query(`CREATE FUNCTION fail_generated_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
     IF NEW."type" = 'CREATED' AND NEW."metadata"->'after'->>'title' = 'Fail batch'
@@ -99,7 +126,8 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
     THEN RAISE EXCEPTION 'test journal failure'; END IF; RETURN NEW; END $$;
     CREATE TRIGGER fail_generated_event BEFORE INSERT ON "TaskAction" FOR EACH ROW EXECUTE FUNCTION fail_generated_event();`);
   const failing = (await request("POST", "/routines", { ...input, title: "Fail batch" })).body;
-  assert.equal((await request("POST", `/routines/${failing.id}/generate`, range)).status, 500);
+  assert.equal((await request("POST", `/routines/${failing.id}/generate`, { ...range,
+    planning: [{ occurrenceKey: `v1:${failing.id}:daily:2026-10-25`, plannedAt: "2026-12-01T10:00:00Z" }] })).status, 500);
   assert.equal(await prisma.routineOccurrence.count({ where: { routineId: failing.id } }), 0);
   assert.equal(await prisma.task.count({ where: { title: "Fail batch" } }), 0);
   await sql.query("DROP TRIGGER fail_generated_event ON \"TaskAction\"; DROP FUNCTION fail_generated_event()");
@@ -151,12 +179,17 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   const done = await prisma.taskAction.findFirstOrThrow({ where: { taskId: first.taskId, type: "STATUS_CHANGED" }, orderBy: { timestamp: "desc" } });
   const nextDate = Temporal.Instant.from(done.timestamp.toISOString()).toZonedDateTimeISO("Europe/Kyiv").toPlainDate().add({ days: 2 }).toString();
   const completionRange = { from: nextDate, to: nextDate };
-  const successors = await Promise.all([1, 2].map(() => request("POST", `/routines/${completion.id}/generate`, completionRange)));
+  const successorPreview = await request("GET", `/routines/${completion.id}/generation-preview?from=${nextDate}&to=${nextDate}`);
+  assert.equal(successorPreview.status, 200); assert.equal(successorPreview.body.occurrences[0].existing, false);
+  const successors = await Promise.all(plans.map((plannedAt) => request("POST", `/routines/${completion.id}/generate`, { ...completionRange,
+    planning: [{ occurrenceKey: successorPreview.body.occurrences[0].occurrenceKey, plannedAt }] })));
   assert.ok(successors.every((response) => response.status === 200), JSON.stringify(successors));
   assert.deepEqual(successors.map((response) => response.body.createdCount).sort(), [0, 1]);
   const second = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: completion.id, occurrenceNumber: 2 }, include: { task: true } });
   assert.equal(second.basisCompletedAt!.toISOString(), done.timestamp.toISOString());
   assert.equal(second.startDate, nextDate);
+  const successorWinner = successors.findIndex((response) => response.body.createdCount === 1);
+  assert.equal(second.task!.plannedAt!.toISOString(), new Date(plans[successorWinner]).toISOString());
   const { id: _secondId, task: _secondTask, ...secondFields } = second;
   for (const patch of [{ occurrenceKey: "duplicate-number" }, { occurrenceKey: "duplicate-predecessor", occurrenceNumber: 3 }]) {
     await assert.rejects(prisma.routineOccurrence.create({ data: { ...secondFields, snapshot: {}, ...patch } }),

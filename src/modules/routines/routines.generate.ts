@@ -7,13 +7,25 @@ import { normalizePreviewHistory, PREVIEW_HISTORY_BUDGET } from "./routines.prev
 import { calculateRoutinePreview } from "./routines.preview";
 import { routinePreviewQuerySchema } from "./routines.preview.schemas";
 
-export const generateRoutineSchema = z.strictObject({
+export const MAX_NEW_ROUTINE_TASKS = 100;
+export const generationRangeSchema = z.strictObject({
   from: routinePreviewQuerySchema.shape.from,
   to: routinePreviewQuerySchema.shape.to,
 }).superRefine((value, ctx) => {
-  const parsed = routinePreviewQuerySchema.safeParse(value);
+  const parsed = routinePreviewQuerySchema.safeParse({ from: value.from, to: value.to });
   if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ code: "custom", path: issue.path, message: issue.message });
 });
+export const generateRoutineSchema = generationRangeSchema.safeExtend({
+  planning: z.array(z.strictObject({
+    occurrenceKey: z.string().min(1).max(512),
+    plannedAt: z.iso.datetime({ offset: true }).refine((value) => Number.isFinite(new Date(value).getTime()), "Expected a valid timestamp.")
+      .transform((value) => new Date(value)),
+  })).max(MAX_NEW_ROUTINE_TASKS).optional(),
+}).superRefine((value, ctx) => {
+  const keys = value.planning?.map((entry) => entry.occurrenceKey) ?? [];
+  if (new Set(keys).size !== keys.length) ctx.addIssue({ code: "custom", path: ["planning"], message: "Planning occurrenceKey values must be unique." });
+});
+export type GenerationRange = z.output<typeof generationRangeSchema>;
 export type GenerateRoutineInput = z.output<typeof generateRoutineSchema>;
 export type GenerationRoutine = ReturnType<typeof toRoutineResponse>;
 export function generationConflict(message: string): never { throw new ApiError(409, message); }
@@ -83,7 +95,7 @@ export function readGenerationHistory(routine: GenerationRoutine, actions: reado
   return { history, effectiveDate };
 }
 
-export function planRoutineGeneration(routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerateRoutineInput) {
+export function planRoutineGeneration(routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerationRange) {
   const { history, effectiveDate } = readGenerationHistory(routine, actions);
   const preview = calculateRoutinePreview(routine, range.from, range.to, 500, history);
   const blocking = preview.limitations.filter((code) => code !== "CURRENT_CONFIGURATION_PROJECTION" && code !== "CONFIGURATION_CHANGED");

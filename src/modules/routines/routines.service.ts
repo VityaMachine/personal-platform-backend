@@ -2,13 +2,13 @@ import { ApiError } from "../../lib/api-error";
 import { toRoutineActionResponse, toRoutineResponse } from "./routines.mapper";
 import { RoutinesTransactionConflictError, type RoutinesRepository, type RoutinesTransactionRepository } from "./routines.repository";
 import { routineStateSchema, type CreateRoutineInput, type UpdateRoutineInput, type RoutineState } from "./routines.schemas";
-import { calculateRoutinePreview, type PreviewOccurrence } from "./routines.preview";
+import { calculateRoutinePreview } from "./routines.preview";
 import { normalizePreviewHistory, PREVIEW_HISTORY_BUDGET } from "./routines.preview-history";
 import type { RoutinePreviewQuery } from "./routines.preview.schemas";
-import { calendarConfiguration, generationConflict, planRoutineGeneration, type GenerateRoutineInput } from "./routines.generate";
+import { calendarConfiguration, generationConflict, type GenerateRoutineInput, type GenerationRange } from "./routines.generate";
 import { createTaskWithSubtasks } from "../tasks/tasks.creation";
 import type { Prisma } from "../../generated/prisma/client";
-import { generateCompletionRoutine, type CompletionChainFields } from "./routines.generate-completion";
+import { resolveRoutineGeneration, validateGenerationPlanning } from "./routines.generation-resolver";
 
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 export function createRoutinesService(repository: RoutinesRepository, now: () => Date = () => new Date()) {
@@ -31,6 +31,15 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
   async function checkArea(areaId: string | null, tx: RoutinesTransactionRepository) {
     if (areaId && !await tx.findArea(areaId)) throw new ApiError(404, "Area not found.");
   }
+  async function resolveGeneration(id: string, range: GenerationRange, tx: RoutinesTransactionRepository) {
+    // Area -> Routine -> latest completion Task; SELECT locks never create records.
+    const initial = await find(id, tx, true);
+    await checkArea(initial.areaId, tx);
+    await tx.lock(id);
+    const routine = await find(id, tx, true);
+    const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
+    return { routine, candidates: await resolveRoutineGeneration(routine, actions, range, tx, now()) };
+  }
   function state(routine: Awaited<ReturnType<typeof find>>): RoutineState {
     return routineStateSchema.parse({
       title: routine.title, description: routine.description, priority: routine.priority, areaId: routine.areaId,
@@ -42,15 +51,25 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
   return {
     list() { return transaction(async (tx) => (await tx.findMany({ deletedAt: null })).map(toRoutineResponse)); },
     get(id: string) { return transaction((tx) => find(id, tx)); },
-    generate(id: string, range: GenerateRoutineInput) {
+    generationPreview(id: string, range: GenerationRange) {
       return transaction(async (tx) => {
-        // Area first, Routine second: consistent with Area deletion and area assignment.
-        const initial = await find(id, tx, true);
-        await checkArea(initial.areaId, tx);
-        await tx.lock(id);
-        const routine = await find(id, tx, true);
-        const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
-        async function persist(candidate: PreviewOccurrence, chain?: CompletionChainFields) {
+        const { routine, candidates } = await resolveGeneration(id, range, tx);
+        return { routineId: id, timezone: routine.timezone, ...range,
+          occurrences: candidates.map((entry) => ({ ...entry.occurrence,
+            instant: entry.occurrence.instant === null ? null : new Date(entry.occurrence.instant).toISOString(),
+            existing: entry.existingTaskId !== null })) };
+      });
+    },
+    generate(id: string, input: GenerateRoutineInput) {
+      const range = { from: input.from, to: input.to };
+      return transaction(async (tx) => {
+        const { routine, candidates } = await resolveGeneration(id, range, tx);
+        const planning = validateGenerationPlanning(routine, candidates, input.planning);
+        const created: { occurrenceKey: string; taskId: string }[] = [];
+        const existing: typeof created = [];
+        // Resolve and validate the entire planning map before any writes.
+        for (const { occurrence: candidate, chain, existingTaskId } of candidates) {
+          if (existingTaskId !== null) { existing.push({ occurrenceKey: candidate.occurrenceKey, taskId: existingTaskId }); continue; }
           const { diagnostics: _diagnostics, ...calendar } = candidate;
           const occurrence = await tx.createOccurrence({ ...calendar, ...chain, routineId: id,
             instant: calendar.instant === null ? null : new Date(calendar.instant),
@@ -58,27 +77,9 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
           const { snapshot: _snapshot, createdAt: _createdAt, ...origin } = occurrence;
           const task = await createTaskWithSubtasks(tx.tasks, {
             title: routine.title, description: routine.description, priority: routine.priority,
-            estimatedDurationMinutes: routine.estimatedDurationMinutes, plannedAt: null, dueAt: null,
+            estimatedDurationMinutes: routine.estimatedDurationMinutes, plannedAt: planning.get(candidate.occurrenceKey) ?? null, dueAt: null,
           }, routine.subtasks, { area: routine.area, routineOccurrence: { ...origin, snapshot: occurrence.snapshot } });
-          return { occurrenceKey: occurrence.occurrenceKey, taskId: task.id };
-        }
-        if (routine.schedule.recurrence.type === "AFTER_COMPLETION") {
-          return generateCompletionRoutine(routine, actions, range, tx, now(), persist);
-        }
-        const candidates = planRoutineGeneration(routine, actions, range);
-        const stored = candidates.length ? await tx.findOccurrences(id, candidates.map((entry) => entry.occurrenceKey)) : [];
-        const byKey = new Map(stored.map((entry) => [entry.occurrenceKey, entry]));
-        if (candidates.filter((entry) => !byKey.has(entry.occurrenceKey)).length > 100) {
-          generationConflict("Generation would create more than 100 new Tasks. Request a smaller range.");
-        }
-        if (stored.some((entry) => !entry.task)) generationConflict("Stored Routine occurrence has no Task. Generation requires repair.");
-        const created: { occurrenceKey: string; taskId: string }[] = [];
-        const existing: typeof created = [];
-        // All schedule, history, DST and volume validation finishes before the first write.
-        for (const candidate of candidates) {
-          const previous = byKey.get(candidate.occurrenceKey);
-          if (previous) { existing.push({ occurrenceKey: candidate.occurrenceKey, taskId: previous.task!.id }); continue; }
-          created.push(await persist(candidate));
+          created.push({ occurrenceKey: occurrence.occurrenceKey, taskId: task.id });
         }
         return { routineId: id, ...range, createdCount: created.length, existingCount: existing.length, created, existing };
       });

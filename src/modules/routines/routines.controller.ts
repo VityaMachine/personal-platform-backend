@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import type { CreateRoutineInput, UpdateRoutineInput } from "./routines.schemas";
 import type { RoutinesService } from "./routines.service";
 import type { RoutinePreviewQuery } from "./routines.preview.schemas";
-import type { GenerateRoutineInput } from "./routines.generate";
+import type { GenerateRoutineInput, GenerationRange } from "./routines.generate";
 
 type RoutineResponse<Locals extends Record<string, unknown>> = Response<unknown, Locals>;
 export function createRoutinesController(service: RoutinesService) {
@@ -14,6 +14,9 @@ export function createRoutinesController(service: RoutinesService) {
     },
     async generate(_request: Request, response: RoutineResponse<{ id: string; body: GenerateRoutineInput }>) {
       response.json(await service.generate(response.locals.id, response.locals.body));
+    },
+    async generationPreview(_request: Request, response: RoutineResponse<{ id: string; query: GenerationRange }>) {
+      response.json(await service.generationPreview(response.locals.id, response.locals.query));
     },
     async create(_request: Request, response: RoutineResponse<{ body: CreateRoutineInput }>) {
       response.status(201).json(await service.create(response.locals.body));
