@@ -51,7 +51,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
     assert.deepEqual(include, {
       area: { select: { id: true, name: true } },
       routineOccurrence: { select: { id: true, routineId: true, occurrenceKey: true, startDate: true, endDate: true,
-        timezone: true, localTime: true, instant: true } },
+        timezone: true, localTime: true, instant: true, occurrenceNumber: true, previousOccurrenceId: true, basisCompletedAt: true } },
       subtasks: { where: { deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
     });
     return structuredClone({
@@ -87,6 +87,11 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
         operations.push(`routine-lock:${id}`);
         assert.match(strings.join("?"), /WHERE "id" = \?::uuid FOR UPDATE/);
         return db.routines.filter((routine) => routine.id === id).map(({ id }) => ({ id }));
+      }
+      if (strings.join("?").includes('FROM "Task"')) {
+        operations.push(`task-lock:${id}`);
+        assert.match(strings.join("?"), /WHERE "id" = \?::uuid FOR UPDATE/);
+        return db.tasks.filter((task) => task.id === id).map(({ id }) => ({ id }));
       }
       reads.areaLocks++;
       operations.push(`area-lock:${id}`);
@@ -124,24 +129,34 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
         const entry = db.occurrences.find((entry) => entry.routineId === where.routineId);
         return entry ? { id: entry.id } : null;
       },
-      async findMany({ where }: { where: { routineId: string; occurrenceKey: { in: string[] } } }) {
+      async findMany({ where, take }: { where: { routineId: string; occurrenceKey?: { in: string[] } }; take?: number; orderBy?: unknown }) {
         reads.occurrences++;
-        return db.occurrences.filter((entry) => entry.routineId === where.routineId && where.occurrenceKey.in.includes(entry.occurrenceKey))
+        if (where.occurrenceKey === undefined) {
+          return db.occurrences.filter((entry) => entry.routineId === where.routineId)
+            .sort((a, b) => (a.occurrenceNumber ?? Infinity) - (b.occurrenceNumber ?? Infinity)).slice(0, take)
+            .map((entry) => ({ ...structuredClone(entry), task: (() => {
+              const task = db.tasks.find((task) => task.routineOccurrenceId === entry.id);
+              return task ? { id: task.id } : null;
+            })() }));
+        }
+        return db.occurrences.filter((entry) => entry.routineId === where.routineId && where.occurrenceKey?.in.includes(entry.occurrenceKey))
           .map((entry) => ({ occurrenceKey: entry.occurrenceKey, task: (() => {
             const task = db.tasks.find((task) => task.routineOccurrenceId === entry.id);
             return task ? { id: task.id } : null;
           })() }));
       },
-      async create({ data }: { data: Omit<RoutineOccurrence, "id" | "createdAt"> }) {
+      async create({ data }: { data: Omit<RoutineOccurrence, "id" | "createdAt" | "occurrenceNumber" | "previousOccurrenceId" | "basisCompletedAt"> & Partial<RoutineOccurrence> }) {
         operations.push(`occurrence-create:${data.routineId}`);
         if (occurrencesBeforeFailure !== undefined && occurrencesBeforeFailure-- <= 0) throw new Error("Simulated occurrence write failure");
-        if (occurrenceConflicts-- > 0 || db.occurrences.some((entry) => entry.routineId === data.routineId && entry.occurrenceKey === data.occurrenceKey)) {
+        if (occurrenceConflicts-- > 0 || db.occurrences.some((entry) => entry.routineId === data.routineId && entry.occurrenceKey === data.occurrenceKey)
+          || (data.occurrenceNumber != null && db.occurrences.some((entry) => entry.routineId === data.routineId && entry.occurrenceNumber === data.occurrenceNumber))
+          || (data.previousOccurrenceId != null && db.occurrences.some((entry) => entry.previousOccurrenceId === data.previousOccurrenceId))) {
           throw new Prisma.PrismaClientKnownRequestError("Duplicate occurrence", {
             code: "P2002", clientVersion: "7.10.1", meta: { target: ["routineId", "occurrenceKey"] },
           });
         }
         assert.ok(db.routines.some((routine) => routine.id === data.routineId));
-        const entry = { ...data, id: randomUUID(), createdAt: now() };
+        const entry = { occurrenceNumber: null, previousOccurrenceId: null, basisCompletedAt: null, ...data, id: randomUUID(), createdAt: now() };
         db.occurrences.push(entry);
         return structuredClone(entry);
       },
@@ -229,9 +244,9 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
       },
     },
     task: {
-      async findFirst({ where, include }: { where: { id: string; deletedAt: null }; include?: Prisma.TaskInclude }) {
+      async findFirst({ where, include }: { where: { id: string; deletedAt?: null }; include?: Prisma.TaskInclude }) {
         reads.tasks++;
-        const task = db.tasks.find((task) => task.id === where.id && task.deletedAt === where.deletedAt);
+        const task = db.tasks.find((task) => task.id === where.id && (where.deletedAt === undefined || task.deletedAt === where.deletedAt));
         return task ? taskResult(db, task, include) : null;
       },
       async findMany({ where, include, select, orderBy }: {
@@ -289,16 +304,17 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
         db.actions.push(action);
         return action;
       },
-      async findMany({ where, orderBy }: {
+      async findMany({ where, orderBy, take }: {
         where: { taskId: string | { in: string[] }; type?: { in: string[] } };
         orderBy: unknown;
+        take?: number;
       }) {
         reads.history++;
         assert.deepEqual(orderBy, [{ timestamp: "asc" }, { id: "asc" }]);
         return structuredClone(db.actions.filter((action) =>
           (typeof where.taskId === "string" ? action.taskId === where.taskId : where.taskId.in.includes(action.taskId)) &&
           (!where.type || where.type.in.includes(action.type)))
-          .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime() || a.id.localeCompare(b.id)));
+          .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime() || a.id.localeCompare(b.id)).slice(0, take));
       },
     },
     subtask: {

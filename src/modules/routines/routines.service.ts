@@ -2,12 +2,13 @@ import { ApiError } from "../../lib/api-error";
 import { toRoutineActionResponse, toRoutineResponse } from "./routines.mapper";
 import { RoutinesTransactionConflictError, type RoutinesRepository, type RoutinesTransactionRepository } from "./routines.repository";
 import { routineStateSchema, type CreateRoutineInput, type UpdateRoutineInput, type RoutineState } from "./routines.schemas";
-import { calculateRoutinePreview } from "./routines.preview";
+import { calculateRoutinePreview, type PreviewOccurrence } from "./routines.preview";
 import { normalizePreviewHistory, PREVIEW_HISTORY_BUDGET } from "./routines.preview-history";
 import type { RoutinePreviewQuery } from "./routines.preview.schemas";
 import { calendarConfiguration, generationConflict, planRoutineGeneration, type GenerateRoutineInput } from "./routines.generate";
 import { createTaskWithSubtasks } from "../tasks/tasks.creation";
 import type { Prisma } from "../../generated/prisma/client";
+import { generateCompletionRoutine, type CompletionChainFields } from "./routines.generate-completion";
 
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 export function createRoutinesService(repository: RoutinesRepository, now: () => Date = () => new Date()) {
@@ -48,7 +49,23 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
         await checkArea(initial.areaId, tx);
         await tx.lock(id);
         const routine = await find(id, tx, true);
-        const candidates = planRoutineGeneration(routine, await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1), range);
+        const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
+        async function persist(candidate: PreviewOccurrence, chain?: CompletionChainFields) {
+          const { diagnostics: _diagnostics, ...calendar } = candidate;
+          const occurrence = await tx.createOccurrence({ ...calendar, ...chain, routineId: id,
+            instant: calendar.instant === null ? null : new Date(calendar.instant),
+            snapshot: JSON.parse(JSON.stringify(routine)) as Prisma.InputJsonValue });
+          const { snapshot: _snapshot, createdAt: _createdAt, ...origin } = occurrence;
+          const task = await createTaskWithSubtasks(tx.tasks, {
+            title: routine.title, description: routine.description, priority: routine.priority,
+            estimatedDurationMinutes: routine.estimatedDurationMinutes, plannedAt: null, dueAt: null,
+          }, routine.subtasks, { area: routine.area, routineOccurrence: { ...origin, snapshot: occurrence.snapshot } });
+          return { occurrenceKey: occurrence.occurrenceKey, taskId: task.id };
+        }
+        if (routine.schedule.recurrence.type === "AFTER_COMPLETION") {
+          return generateCompletionRoutine(routine, actions, range, tx, now(), persist);
+        }
+        const candidates = planRoutineGeneration(routine, actions, range);
         const stored = candidates.length ? await tx.findOccurrences(id, candidates.map((entry) => entry.occurrenceKey)) : [];
         const byKey = new Map(stored.map((entry) => [entry.occurrenceKey, entry]));
         if (candidates.filter((entry) => !byKey.has(entry.occurrenceKey)).length > 100) {
@@ -61,16 +78,7 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
         for (const candidate of candidates) {
           const previous = byKey.get(candidate.occurrenceKey);
           if (previous) { existing.push({ occurrenceKey: candidate.occurrenceKey, taskId: previous.task!.id }); continue; }
-          const { diagnostics: _diagnostics, ...calendar } = candidate;
-          const occurrence = await tx.createOccurrence({ ...calendar, routineId: id,
-            instant: calendar.instant === null ? null : new Date(calendar.instant),
-            snapshot: JSON.parse(JSON.stringify(routine)) as Prisma.InputJsonValue });
-          const { snapshot: _snapshot, createdAt: _createdAt, ...origin } = occurrence;
-          const task = await createTaskWithSubtasks(tx.tasks, {
-            title: routine.title, description: routine.description, priority: routine.priority,
-            estimatedDurationMinutes: routine.estimatedDurationMinutes, plannedAt: null, dueAt: null,
-          }, routine.subtasks, { area: routine.area, routineOccurrence: { ...origin, snapshot: occurrence.snapshot } });
-          created.push({ occurrenceKey: occurrence.occurrenceKey, taskId: task.id });
+          created.push(await persist(candidate));
         }
         return { routineId: id, ...range, createdCount: created.length, existingCount: existing.length, created, existing };
       });

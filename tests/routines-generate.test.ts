@@ -38,7 +38,10 @@ test("massage generates seven Tasks with stable occurrence keys, null personal d
     assert.equal(task.routineOccurrence.routineId, r.id);
     assert.equal(task.routineOccurrence.timezone, "Europe/Kyiv");
     assert.equal(task.routineOccurrence.localTime, "18:00");
-    assert.equal(Object.keys(task.routineOccurrence).length, 8);
+    assert.equal(Object.keys(task.routineOccurrence).length, 11);
+    assert.equal(task.routineOccurrence.occurrenceNumber, null);
+    assert.equal(task.routineOccurrence.previousOccurrenceId, null);
+    assert.equal(task.routineOccurrence.basisCompletedAt, null);
     assert.equal("snapshot" in task.routineOccurrence, false);
     assert.equal("routineOccurrenceId" in task, false);
     assert.deepEqual(f.state().occurrences.find((entry) => entry.id === task.routineOccurrence.id)!.snapshot, r);
@@ -177,10 +180,6 @@ test("generate validates exact body/UUID and rejects paused/deleted/completion R
   assert.deepEqual(f.state(), paused);
   await f.routineRequest("DELETE", `/${r.id}`);
   assert.equal((await f.routineRequest("POST", `/${r.id}/generate`, range)).status, 404);
-  const completion = (await f.routineRequest("POST", "", { ...massage,
-    schedule: { version: 1, recurrence: { type: "AFTER_COMPLETION", intervalDays: 2 } } })).body;
-  const rejected = await f.routineRequest("POST", `/${completion.id}/generate`, range);
-  assert.equal(rejected.status, 409); assert.match(rejected.body.error.message, /AFTER_COMPLETION/);
 });
 
 test("DST and incomplete/budgeted histories reject atomically; all-day instant=null is valid", async (t) => {

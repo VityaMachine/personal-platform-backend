@@ -16,7 +16,7 @@ export const generateRoutineSchema = z.strictObject({
 });
 export type GenerateRoutineInput = z.output<typeof generateRoutineSchema>;
 export type GenerationRoutine = ReturnType<typeof toRoutineResponse>;
-export const generationConflict = (message: string): never => { throw new ApiError(409, message); };
+export function generationConflict(message: string): never { throw new ApiError(409, message); }
 
 export function calendarConfiguration(value: Pick<GenerationRoutine, "schedule" | "timezone" | "startDate" | "endCondition">) {
   return JSON.stringify([value.schedule, value.timezone, value.startDate, value.endCondition]);
@@ -68,9 +68,8 @@ function configurationEffectiveDate(routine: GenerationRoutine, actions: readonl
   return effectiveDate;
 }
 
-export function planRoutineGeneration(routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerateRoutineInput) {
+export function readGenerationHistory(routine: GenerationRoutine, actions: readonly RoutineAction[]) {
   if (routine.pausedAt) generationConflict("Routine is paused. Resume it before generation.");
-  if (routine.schedule.recurrence.type === "AFTER_COMPLETION") generationConflict("AFTER_COMPLETION generation is not supported. Only calendar Routines can generate Tasks.");
   if (actions.length > PREVIEW_HISTORY_BUDGET) generationConflict("Routine history budget exceeded. Generation cannot use a partial history.");
   let history: ReturnType<typeof normalizePreviewHistory>;
   let effectiveDate: string | null;
@@ -81,6 +80,11 @@ export function planRoutineGeneration(routine: GenerationRoutine, actions: reado
     if (error instanceof ApiError) throw error;
     return generationConflict("Routine history is invalid. Generation requires a consistent history.");
   }
+  return { history, effectiveDate };
+}
+
+export function planRoutineGeneration(routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerateRoutineInput) {
+  const { history, effectiveDate } = readGenerationHistory(routine, actions);
   const preview = calculateRoutinePreview(routine, range.from, range.to, 500, history);
   const blocking = preview.limitations.filter((code) => code !== "CURRENT_CONFIGURATION_PROJECTION" && code !== "CONFIGURATION_CHANGED");
   if (blocking.length || preview.truncated) generationConflict(`Routine schedule cannot be generated completely: ${blocking.join(", ") || "TRUNCATED"}.`);

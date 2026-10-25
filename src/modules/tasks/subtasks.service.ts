@@ -12,6 +12,7 @@ type Dependencies = {
 
 export function createSubtasksService({ findTask, transaction }: Dependencies) {
   async function writableParent(taskId: string, tx: Transaction) {
+    await tx.lock(taskId);
     const parent = await findTask(taskId, tx);
     if (parent.archivedAt) throw new ApiError(409, "Archived task subtasks cannot be changed.");
     return parent;

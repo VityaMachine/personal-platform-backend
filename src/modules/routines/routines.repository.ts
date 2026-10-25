@@ -15,6 +15,11 @@ export function createRoutineQueries(db: Prisma.TransactionClient) {
     tasks: createTaskQueries(db),
     lock(id: string) { return lockRoutine(db, id); },
     hasOccurrences(routineId: string) { return db.routineOccurrence.findFirst({ where: { routineId }, select: { id: true } }); },
+    findCompletionChain(routineId: string, take: number) {
+      return db.routineOccurrence.findMany({ where: { routineId }, orderBy: { occurrenceNumber: "asc" }, take,
+        select: { id: true, routineId: true, occurrenceKey: true, occurrenceNumber: true, previousOccurrenceId: true,
+          basisCompletedAt: true, startDate: true, endDate: true, task: { select: { id: true } } } });
+    },
     findOccurrences(routineId: string, occurrenceKeys: string[]) {
       return db.routineOccurrence.findMany({ where: { routineId, occurrenceKey: { in: occurrenceKeys } },
         select: { occurrenceKey: true, task: { select: { id: true } } } });
@@ -59,8 +64,10 @@ export function isRoutineOccurrenceUniqueConflict(error: Prisma.PrismaClientKnow
   const index = constraint?.index;
   const fields = constraint?.fields ?? (Array.isArray(target) ? target : []);
   return error.code === "P2002" && (
-    fields.includes("routineOccurrenceId") || (fields.includes("routineId") && fields.includes("occurrenceKey"))
-    || [target, index].some((name) => name === "RoutineOccurrence_routineId_occurrenceKey_key" || name === "Task_routineOccurrenceId_key"));
+    fields.includes("routineOccurrenceId") || fields.includes("previousOccurrenceId")
+    || (fields.includes("routineId") && (fields.includes("occurrenceKey") || fields.includes("occurrenceNumber")))
+    || [target, index].some((name) => ["RoutineOccurrence_routineId_occurrenceKey_key", "Task_routineOccurrenceId_key",
+      "RoutineOccurrence_routineId_occurrenceNumber_key", "RoutineOccurrence_previousOccurrenceId_key"].includes(String(name))));
 }
 export function createRoutinesRepository(client: () => PrismaClient = getPrisma) {
   return {

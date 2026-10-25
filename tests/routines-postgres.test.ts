@@ -14,6 +14,7 @@ import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
 import { createAreasRouter } from "../src/modules/areas/areas.routes";
 import { errorHandler } from "../src/middleware/error-handler";
 import { isRoutineOccurrenceUniqueConflict } from "../src/modules/routines/routines.repository";
+import { Temporal } from "@js-temporal/polyfill";
 
 // Opt-in only. All migrations, including old data-changing migrations, run in a NEW isolated schema.
 // DATABASE_URL/DIRECT_URL and .env credentials are never used by this test.
@@ -35,13 +36,22 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   const directory = path.resolve("prisma/migrations");
   const migrations = (await readdir(directory, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
   const ordinaryId = randomUUID();
+  const legacyRoutineId = randomUUID(), legacyOccurrenceId = randomUUID();
   for (const migration of migrations) {
     if (migration === "20261025120000_routine_occurrences") {
       await sql.query('INSERT INTO "Task" ("id", "title", "estimatedDurationMinutes", "updatedAt") VALUES ($1, $2, 10, now())', [ordinaryId, "Existing ordinary task"]);
     }
+    if (migration === "20261025130000_routine_completion_chain") {
+      await sql.query(`INSERT INTO "Routine" ("id", "title", "estimatedDurationMinutes", "timezone", "startDate", "schedule", "endCondition", "updatedAt")
+        VALUES ($1, 'Legacy calendar', 10, 'UTC', '2026-01-01', '{"version":1,"recurrence":{"type":"DAILY","intervalDays":1}}', '{"type":"NEVER"}', now())`, [legacyRoutineId]);
+      await sql.query(`INSERT INTO "RoutineOccurrence" ("id", "routineId", "occurrenceKey", "startDate", "endDate", "timezone", "snapshot")
+        VALUES ($1, $2, 'legacy-calendar-key', '2026-01-01', '2026-01-01', 'UTC', '{}')`, [legacyOccurrenceId, legacyRoutineId]);
+    }
     await sql.query(await readFile(path.join(directory, migration, "migration.sql"), "utf8"));
   }
   assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: ordinaryId } })).routineOccurrenceId, null);
+  const legacy = await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: legacyOccurrenceId } });
+  assert.equal(legacy.occurrenceNumber, null); assert.equal(legacy.previousOccurrenceId, null); assert.equal(legacy.basisCompletedAt, null);
   const app = express(); app.use(express.json());
   app.use("/api/routines", createRoutinesRouter(() => prisma));
   app.use("/api/tasks", createTasksRouter(() => prisma));
@@ -129,4 +139,82 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   assert.equal(deletion.status, 204); assert.equal(areaGeneration.status, 200);
   assert.equal(await prisma.task.count({ where: { areaId: area.id } }), 0);
   assert.equal((await prisma.routine.findUniqueOrThrow({ where: { id: linked.id } })).areaId, null);
+
+  const completionInput = { ...input, title: "Completion chain", startDate: "2026-01-01",
+    schedule: { version: 1, recurrence: { type: "AFTER_COMPLETION", intervalDays: 2 } } };
+  const completion = (await request("POST", "/routines", completionInput)).body;
+  const firstResponses = await Promise.all([1, 2].map(() => request("POST", `/routines/${completion.id}/generate`, { from: "2026-01-01", to: "2026-01-01" })));
+  assert.ok(firstResponses.every((response) => response.status === 200));
+  assert.deepEqual(firstResponses.map((response) => response.body.createdCount).sort(), [0, 1]);
+  const first = firstResponses.find((response) => response.body.createdCount === 1)!.body.created[0];
+  assert.equal((await request("PATCH", `/tasks/${first.taskId}`, { status: "DONE" })).status, 200);
+  const done = await prisma.taskAction.findFirstOrThrow({ where: { taskId: first.taskId, type: "STATUS_CHANGED" }, orderBy: { timestamp: "desc" } });
+  const nextDate = Temporal.Instant.from(done.timestamp.toISOString()).toZonedDateTimeISO("Europe/Kyiv").toPlainDate().add({ days: 2 }).toString();
+  const completionRange = { from: nextDate, to: nextDate };
+  const successors = await Promise.all([1, 2].map(() => request("POST", `/routines/${completion.id}/generate`, completionRange)));
+  assert.ok(successors.every((response) => response.status === 200), JSON.stringify(successors));
+  assert.deepEqual(successors.map((response) => response.body.createdCount).sort(), [0, 1]);
+  const second = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: completion.id, occurrenceNumber: 2 }, include: { task: true } });
+  assert.equal(second.basisCompletedAt!.toISOString(), done.timestamp.toISOString());
+  assert.equal(second.startDate, nextDate);
+  const { id: _secondId, task: _secondTask, ...secondFields } = second;
+  for (const patch of [{ occurrenceKey: "duplicate-number" }, { occurrenceKey: "duplicate-predecessor", occurrenceNumber: 3 }]) {
+    await assert.rejects(prisma.routineOccurrence.create({ data: { ...secondFields, snapshot: {}, ...patch } }),
+      (error: Prisma.PrismaClientKnownRequestError) => error.code === "P2002" && isRoutineOccurrenceUniqueConflict(error));
+  }
+  await request("PATCH", `/tasks/${first.taskId}`, { status: "TODO" });
+  const retry = await request("POST", `/routines/${completion.id}/generate`, completionRange);
+  assert.equal(retry.status, 200); assert.equal(retry.body.existing[0].taskId, second.task!.id);
+  await request("PATCH", `/tasks/${second.task!.id}`, { status: "DONE" });
+  const nextDone = await prisma.taskAction.findFirstOrThrow({ where: { taskId: second.task!.id, type: "STATUS_CHANGED" }, orderBy: { timestamp: "desc" } });
+  const thirdDate = Temporal.Instant.from(nextDone.timestamp.toISOString()).toZonedDateTimeISO("Europe/Kyiv").toPlainDate().add({ days: 2 }).toString();
+  const [continuation, reopening] = await Promise.all([
+    request("POST", `/routines/${completion.id}/generate`, { from: thirdDate, to: thirdDate }),
+    request("PATCH", `/tasks/${second.task!.id}`, { status: "TODO" }),
+  ]);
+  assert.equal(reopening.status, 200); assert.ok([200, 409].includes(continuation.status), JSON.stringify(continuation));
+  const completionCount = await prisma.routineOccurrence.count({ where: { routineId: completion.id } });
+  assert.equal(completionCount, continuation.body.createdCount === 1 ? 3 : 2);
+  if (continuation.body.createdCount === 1) {
+    const third = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: completion.id, occurrenceNumber: 3 } });
+    assert.equal(third.previousOccurrenceId, second.id); assert.equal(third.basisCompletedAt!.toISOString(), nextDone.timestamp.toISOString());
+  }
+
+  const automatic = (await request("POST", "/routines", { ...completionInput, subtasks: [{ title: "Done automatically", estimatedDurationMinutes: 5 }] })).body;
+  const parentId = (await request("POST", `/routines/${automatic.id}/generate`, { from: "2026-01-01", to: "2026-01-01" })).body.created[0].taskId;
+  const child = await prisma.subtask.findFirstOrThrow({ where: { taskId: parentId } });
+  const [automaticStatus, automaticGeneration] = await Promise.all([
+    request("PATCH", `/tasks/${parentId}/subtasks/${child.id}`, { status: "DONE" }),
+    request("POST", `/routines/${automatic.id}/generate`, completionRange),
+  ]);
+  assert.equal(automaticStatus.status, 200); assert.ok([200, 409].includes(automaticGeneration.status));
+  assert.equal((await request("POST", `/routines/${automatic.id}/generate`, completionRange)).status, 200);
+  assert.equal(await prisma.routineOccurrence.count({ where: { routineId: automatic.id } }), 2);
+  const automaticDone = await prisma.taskAction.findFirstOrThrow({ where: { taskId: parentId, type: "STATUS_CHANGED" } });
+  const automaticNext = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: automatic.id, occurrenceNumber: 2 } });
+  assert.equal(automaticNext.basisCompletedAt!.toISOString(), automaticDone.timestamp.toISOString());
+
+  const deletingCompletion = (await request("POST", "/routines", completionInput)).body;
+  const deletingTaskId = (await request("POST", `/routines/${deletingCompletion.id}/generate`, { from: "2026-01-01", to: "2026-01-01" })).body.created[0].taskId;
+  await request("PATCH", `/tasks/${deletingTaskId}`, { status: "DONE" });
+  const [deletingGeneration, taskDeletion] = await Promise.all([
+    request("POST", `/routines/${deletingCompletion.id}/generate`, completionRange), request("DELETE", `/tasks/${deletingTaskId}`),
+  ]);
+  assert.equal(taskDeletion.status, 204); assert.ok([200, 409].includes(deletingGeneration.status));
+  assert.equal(await prisma.routineOccurrence.count({ where: { routineId: deletingCompletion.id } }), deletingGeneration.status === 200 ? 2 : 1);
+
+  await sql.query(`CREATE FUNCTION fail_completion_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+    IF NEW."type" = 'SUBTASK_CREATED' AND EXISTS (
+      SELECT 1 FROM "Task" t JOIN "RoutineOccurrence" o ON t."routineOccurrenceId" = o."id"
+      WHERE t."id" = NEW."taskId" AND t."title" = 'Fail completion' AND o."occurrenceNumber" = 2)
+    THEN RAISE EXCEPTION 'test completion journal failure'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER fail_completion_event BEFORE INSERT ON "TaskAction" FOR EACH ROW EXECUTE FUNCTION fail_completion_event();`);
+  const failingCompletion = (await request("POST", "/routines", { ...completionInput, title: "Fail completion",
+    subtasks: [{ title: "Child rollback", estimatedDurationMinutes: 5 }] })).body;
+  const failingFirst = (await request("POST", `/routines/${failingCompletion.id}/generate`, { from: "2026-01-01", to: "2026-01-01" })).body.created[0];
+  await request("PATCH", `/tasks/${failingFirst.taskId}`, { status: "DONE" });
+  const beforeFailure = { tasks: await prisma.task.count(), children: await prisma.subtask.count(), actions: await prisma.taskAction.count() };
+  assert.equal((await request("POST", `/routines/${failingCompletion.id}/generate`, completionRange)).status, 500);
+  assert.equal(await prisma.routineOccurrence.count({ where: { routineId: failingCompletion.id } }), 1);
+  assert.deepEqual({ tasks: await prisma.task.count(), children: await prisma.subtask.count(), actions: await prisma.taskAction.count() }, beforeFailure);
 });

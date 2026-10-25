@@ -5,7 +5,8 @@ import type { TasksTransactionRepository } from "./tasks.repository";
 type CreationContext = {
   area: { id: string; name: string } | null;
   routineOccurrence?: { id: string; routineId: string; occurrenceKey: string; startDate: string; endDate: string;
-    timezone: string; localTime: string | null; instant: Date | null; snapshot?: Prisma.JsonValue };
+    timezone: string; localTime: string | null; instant: Date | null; snapshot?: Prisma.JsonValue;
+    occurrenceNumber: number | null; previousOccurrenceId: string | null; basisCompletedAt: Date | null };
 };
 
 /** Shared transactional domain creation. The caller validates input, locks Area and owns the transaction. */

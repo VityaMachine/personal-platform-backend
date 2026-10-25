@@ -166,8 +166,8 @@ test("same-ID assignments are event-free and lock Area before writing Task", asy
   assert.equal((await f.request("PATCH", `/${first.id}`, { areaId: area.id.toUpperCase() })).status, 200);
   assert.equal(f.state().actions.length, count);
   assert.deepEqual(f.operations.slice(operations), [
-    `area-lock:${area.id}`, `task-update:${first.id}`,
-    `area-lock:${area.id}`, `task-update:${first.id}`,
+    `area-lock:${area.id}`, `task-lock:${first.id}`, `task-update:${first.id}`,
+    `area-lock:${area.id}`, `task-lock:${first.id}`, `task-update:${first.id}`,
   ]);
 });
 

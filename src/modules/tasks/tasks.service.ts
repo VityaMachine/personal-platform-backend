@@ -81,6 +81,7 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
         // Even a same-ID write must take the Area lock before updating Task:
         // otherwise an FK check can reverse the deletion lock order.
         if (fields.areaId) await assignableArea(fields.areaId, tx);
+        await tx.lock(id);
         if (fields.estimatedDurationMinutes !== undefined && before.subtasks.length) {
           throw new ApiError(409, "Task duration is calculated from its subtasks.");
         }
@@ -127,6 +128,7 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
     },
     remove(id: string) {
       return transaction(async (tx) => {
+        await tx.lock(id);
         const before = await findTask(id, tx);
         const updated = await tx.update(id, { deletedAt: new Date() });
         await tx.createAction(id, "DELETED", {

@@ -1,6 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { clipLocalDateWindow, monthlyWindow, weeklyWindows, type RoutineEndCondition, type RoutineSchedule } from "./routines.schedule";
 import { completionPreviewContextSchema, type CompletionPreviewContext } from "./routines.preview.schemas";
+import { completionCalendarDate } from "./routines.completion-calendar";
 
 export const PREVIEW_PERIOD_BUDGET = 10_000;
 export type PauseInterval = { startDate: string; endDate: string | null }; // [start, end), local dates
@@ -76,17 +77,10 @@ export function calculateRoutinePreview(routine: PreviewRoutine, from: string, t
     return routine.endCondition.type === "COUNT" && number === routine.endCondition.count;
   }
   if (rule.type === "AFTER_COMPLETION") {
-    let date = routine.startDate;
-    if (context) {
-      const local = completedDate!;
-      // Avoid overflow even for the largest valid interval.
-      if (local.until(Temporal.PlainDate.from("9999-12-31")).days < rule.intervalDays) {
-        limitations.add("CALENDAR_RANGE_EXCEEDED"); return result();
-      }
-      date = local.add({ days: rule.intervalDays }).toString();
-      number = context.completedOccurrenceNumber;
-    }
-    accept(date, date, `completion:${number + 1}:${date}`);
+    const candidate = completionCalendarDate(routine, rule.intervalDays, context);
+    if (candidate.date === null) { limitations.add(candidate.limitation!); return result(); }
+    number = candidate.occurrenceNumber - 1;
+    accept(candidate.date, candidate.date, `completion:${candidate.occurrenceNumber}`);
     return result();
   }
   const start = Temporal.PlainDate.from(routine.startDate);

@@ -466,7 +466,7 @@ nullable `Task.areaId`, FK з `ON DELETE RESTRICT`, індекс `Task_areaId_id
 
 ## Routines — шаблони повторюваних задач
 
-**Збереження Routine не створює жодного Task.** Генерація календарних виконань
+**Збереження Routine не створює жодного Task.** Генерація календарних та AFTER_COMPLETION виконань
 запускається лише явним POST `/api/routines/:id/generate`. Cron, автоматичних
 запусків із GET, `isToday` та frontend немає. Read-only preview розраховує календарні
 виконання, не створюючи Task, RoutineAction або інших записів.
@@ -480,7 +480,7 @@ nullable `Task.areaId`, FK з `ON DELETE RESTRICT`, індекс `Task_areaId_id
 | `DELETE /api/routines/:id` | `204`, м'яке видалення без body |
 | `GET /api/routines/:id/history` | `200`, окремий журнал RoutineAction |
 | `GET /api/routines/:id/preview?from=YYYY-MM-DD&to=YYYY-MM-DD` | `200`, проєкція поточного розкладу |
-| `POST /api/routines/:id/generate` | `200`, атомарна генерація до 100 нових Task |
+| `POST /api/routines/:id/generate` | `200`, до 100 нових календарних Task або одного AFTER_COMPLETION наступника |
 
 Список: `createdAt DESC`, потім `id ASC`. Query-параметри дозволені лише для preview.
 Невідомі поля й порожній PATCH відхиляються. Невалідні ID/body/query — `400`,
@@ -629,7 +629,7 @@ Timezone database використовує ICU Node.js, а не системни
 Наприклад, вікно 15–23 та from=20, to=21 повертає 15–23. Межі Routine обрізають
 вікно включно. Одне вікно — один елемент, результати відсортовані хронологічно.
 `occurrenceKey` використовує ID Routine та календарний період/вибір вікна
-(для AFTER_COMPLETION — номер і дату); він не залежить від from/to, limit чи
+(для AFTER_COMPLETION — лише стабільний номер); він не залежить від from/to, limit чи
 випадкового UUID. Це ключ календарного виконання, не остаточний механізм
 захисту генерації Task від дублікатів у БД: для цього є окремі unique constraints.
 
@@ -857,7 +857,7 @@ TaskAction не використовується для шаблонів. Спі
 Лише ці два обов'язкові поля: локальні ISO-дати включно, from <= to, не більше
 366 календарних днів включно. Query, limit, completedAt та completedOccurrenceNumber
 у цьому API не підтримуються. Невалідний UUID/body → `400`, відсутня/видалена
-Routine → `404`. Поточна пауза, AFTER_COMPLETION, недостовірна історія/COUNT,
+Routine → `404`. Поточна пауза, недостовірна історія/COUNT,
 unresolved DST, вичерпаний бюджет або понад 100 **нових** задач → `409` із безпечним
 `error.message`. Весь запит відхиляється до записів; перші 100 мовчки не створюються.
 
@@ -942,7 +942,10 @@ CREATED містить `origin: { type: "ROUTINE", routineId }` і `routineOccur
     "endDate": "2026-10-25",
     "timezone": "Europe/Kyiv",
     "localTime": "18:00",
-    "instant": "2026-10-25T16:00:00.000Z"
+    "instant": "2026-10-25T16:00:00.000Z",
+    "occurrenceNumber": null,
+    "previousOccurrenceId": null,
+    "basisCompletedAt": null
   }
 }
 ```
@@ -957,6 +960,169 @@ CREATED містить `origin: { type: "ROUTINE", routineId }` і `routineOccur
 lock Routine. Унікальні конфлікти виконання та serialization/deadlock конфлікти
 повторюють всю операцію; після вичерпання повертається безпечний `409`, без сирих
 Prisma-помилок. Повтор після втраченого успішного HTTP response також ідемпотентний.
+
+### AFTER_COMPLETION: генерація зі збереженого завершення
+
+Той самий POST `/api/routines/:id/generate` і строгий body `{ from, to }`, той самий
+формат created/existing. Клієнт **не передає** completedAt чи номер виконання:
+ці поля в generate дають `400`. Контекст GET preview залишається окремим read-only
+моделюванням і ніколи не стає фактом завершення. GET та перехід Task у DONE самі
+нічого не генерують. Один POST створює максимум **одне** нове виконання.
+
+Без попередніх виконань кандидат — рівно startDate. Він створюється лише за
+потрапляння в [from, to], з endCondition, timezone, localTime та перевіркою DST.
+Дата запиту не пересуває перше виконання. Далі останнє виконання визначається
+за occurrenceNumber, а не createdAt, UUID чи останнім відредагованим Task.
+
+Для продовження остання Task має бути невидаленою й зараз DONE. Окремий helper
+перевіряє CREATED і весь ланцюжок STATUS_CHANGED до поточного стану. completedAt —
+timestamp останнього реального переходу з іншого статусу в DONE; same-status DONE
+не є новим завершенням. EDITED, AREA_CHANGED та archive не змінюють цей момент.
+Автоматичний STATUS_CHANGED від підзадач перевіряється так само, як ручний.
+Відсутнє CREATED, зламаний ланцюжок, події поза життям Task, кілька реальних
+переходів з однаковим timestamp, невідповідність поточному статусу або вичерпаний
+бюджет історії → `409`, без записів. Журнал без sequence/version не доводить
+відсутності всіх невидимих пропусків, але видимі суперечності не ігноруються.
+
+completedAt переводиться в локальну дату timezone Routine, додаються intervalDays
+**календарних** днів. Спільний helper використовується preview і generate; немає
+другого алгоритму або додавання N × 24 годин. localTime застосовується до отриманої
+дати; без нього instant=null. Нерозв'язаний DST → `409`; час не зсувається й offset
+не обирається. Збережене завершення до локального startDate або вихід календаря
+за 9999 рік також відхиляються явно, відповідно до чинного preview helper.
+
+**Точне правило retry/продовження:**
+
+1. Повертаються всі збережені виконання, які перетинають запитаний діапазон, у
+   `existing`, у порядку occurrenceNumber. Сюди можуть входити ID видалених задач.
+2. Якщо остання Task не DONE, скасована або видалена, але є такі existing,
+   відповідь — `200`, createdCount=0. Це дозволяє повторити успішний POST, коли
+   щойно створений наступник ще TODO. Запит без existing у новий діапазон → `409`
+   із поясненням очікування або зупиненого ланцюжка.
+3. Якщо остання Task DONE із перевіреною історією й кандидат входить у діапазон,
+   створюється один наступник; старі existing можуть бути в тій самій відповіді.
+   Повтор після цього поверне нового наступника як existing, доки він не DONE.
+   Після фактичного DONE цього нового наступника черговий явний POST уже може
+   просунути ланцюжок ще на один крок, навіть із тим самим body. Майбутні завершення
+   не прогнозуються. Допускається однакова календарна дата різних номерів, якщо
+   попередні задачі фактично завершені раніше їхніх планових дат.
+4. Кандидат поза діапазоном або вичерпана endCondition → `200` без нових записів.
+   Зокрема COUNT, що вже досягнутий, повертає 200 незалежно від статусу останньої Task.
+   Поточна пауза Routine має пріоритет: вона завжди дає `409`, включно з retry.
+
+CANCELED та soft delete не створюють заміни й не дозволяють новий крок ланцюжка.
+Архів невидаленої DONE задачі не заважає продовженню. Повторне відкриття до
+генерації означає очікування нового реального DONE; повторний DONE задає нову
+основу для ще не створеного наступника. Якщо наступник уже існує, відкриття,
+повторний DONE або видалення **його попередника** не пересувають і не видаляють
+цього наступника. Наступний крок спирається лише на останню Task ланцюжка.
+
+Для AFTER_COMPLETION COUNT — кількість **створених** виконань, включно зі
+скасованими/видаленими. Їхні номери не використовуються повторно. Це відрізняється
+від календарного COUNT запланованих вікон. NEVER та UNTIL_DATE включно збережені.
+Початкова зміна конфігурації до генерації перевіряється за журналом і датою її
+чинності; COUNT цього режиму відомий зі збереженого ланцюжка, а не історичної
+проєкції. Чинне блокування schedule/timezone/startDate/endCondition після першої
+генерації поширюється також на AFTER_COMPLETION.
+
+Минула пауза застосовується до дати початку кандидата за чинним `[pauseDate, resumeDate)`.
+Якщо кандидат у ній, generate → `409`: потрібне окреме рішення, дата не пересувається,
+кандидат не пропускається, уявний наступний не обчислюється. Ручного відновлення
+скасованого/видаленого ланцюжка та пропусків у цій версії немає.
+
+RoutineOccurrence адитивно містить occurrenceNumber, previousOccurrenceId і
+basisCompletedAt. Перше виконання має номер 1 та два null; наступник — номер +1,
+ID попередника й незмінний timestamp завершення, на якому його створено.
+Ключ: `v1:<routineId>:completion:<occurrenceNumber>`, без completedAt чи дати.
+У БД унікальні `(routineId, occurrenceNumber)` та previousOccurrenceId забезпечують
+унікальний номер і максимум одного наступника; попередні unique/FK збережені.
+У календарних occurrences, включно з наявними до міграції, **усі три поля null**;
+їм не приписуються штучні номери або попередники. Ці три поля також включені в
+routineOccurrence повного Task DTO; решта area/subtasks/summary/isCompleted збережена.
+
+Генерація бере locks Area → Routine → остання Task. PATCH Task спочатку блокує
+Area при її призначенні, потім Task; DELETE Task та мутації підзадач теж блокують
+Task-батька. Завершення, автоматичний DONE, reopen і delete узгоджуються з
+генерацією в Serializable-транзакції. Вставлення occurrence, Task, дітей і журналу
+залишається спільним і атомарним. Unique-конфлікти номерів/попередників також
+повторюють всю транзакцію, без сирих Prisma-помилок.
+
+Бюджети: максимум 10000 подій CREATED/STATUS_CHANGED для перевірки завершення та
+10000 збережених виконань ланцюжка. Перевищення/спроба продовжити ланцюжок понад
+бюджет → явний `409`, без часткового результату. Звичайні календарні бюджети та
+поведінка generate не змінені.
+
+### Postman: AFTER_COMPLETION від першої задачі до наступника
+
+`POST {{baseUrl}}/api/routines`, Body → raw → JSON:
+
+```json
+{
+  "title": "Замінити фільтр",
+  "estimatedDurationMinutes": 15,
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-10-25",
+  "schedule": {
+    "version": 1,
+    "recurrence": { "type": "AFTER_COMPLETION", "intervalDays": 2 },
+    "localTime": "09:00"
+  },
+  "endCondition": { "type": "COUNT", "count": 3 }
+}
+```
+
+У Post-response script цього POST збережіть ID:
+
+```javascript
+pm.environment.set("completionRoutineId", pm.response.json().id);
+```
+
+`POST {{baseUrl}}/api/routines/{{completionRoutineId}}/generate`:
+
+```json
+{ "from": "2026-10-25", "to": "2026-10-25" }
+```
+
+Перший запит → createdCount=1. Збережіть ID першої задачі в Post-response script:
+
+```javascript
+const result = pm.response.json();
+pm.environment.set("completionTaskId", (result.created[0] || result.existing[0]).taskId);
+```
+
+Завершіть її: `PATCH {{baseUrl}}/api/tasks/{{completionTaskId}}`:
+
+```json
+{ "status": "DONE" }
+```
+
+Щоб задати діапазон за **фактичним** timestamp, виконайте
+`GET {{baseUrl}}/api/tasks/{{completionTaskId}}/history`. Post-response script нижче
+бере реальний перехід із журналу й лише готує дату для body; generate усе одно
+самостійно читає та перевіряє збережене завершення:
+
+```javascript
+const done = pm.response.json().filter(a => a.type === "STATUS_CHANGED"
+  && a.metadata.before.status !== "DONE" && a.metadata.after.status === "DONE").at(-1);
+const parts = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit"
+}).formatToParts(new Date(done.timestamp));
+const get = type => Number(parts.find(p => p.type === type).value);
+const calendar = new Date(Date.UTC(get("year"), get("month") - 1, get("day")));
+calendar.setUTCDate(calendar.getUTCDate() + 2);
+pm.environment.set("nextOccurrenceDate", calendar.toISOString().slice(0, 10));
+```
+
+Наступник: `POST {{baseUrl}}/api/routines/{{completionRoutineId}}/generate`:
+
+```json
+{ "from": "{{nextOccurrenceDate}}", "to": "{{nextOccurrenceDate}}" }
+```
+
+Очікується createdCount=1, occurrenceNumber=2. Наприклад, DONE локально 2026-10-25
+дає 2026-10-27 о 09:00 Europe/Kyiv. Повторіть **той самий POST** до завершення
+наступника: `200`, createdCount=0, existingCount=1 і той самий taskId.
+Запит іншого діапазону без existing, поки наступник не DONE, → `409`.
 
 ### Postman: генерація «Масаж» та місячного вікна
 
@@ -1025,11 +1191,22 @@ taskId у existing. Після DELETE задачі повторний generate �
 редаговані. Вона перевірена лише на ізольованому локальному PostgreSQL 17;
 до Supabase не підключались, production-міграцію не застосовували.
 
+Адитивна `20261025130000_routine_completion_chain` додає три nullable поля,
+унікальні номер/попередник, self-FK і перевірку узгодженості полів ланцюжка.
+Наявні календарні occurrences не перенумеровуються та не видаляються. Міграцію
+перевірено лише в нових ізольованих локальних тестових схемах, не в Supabase.
+
 Звичайні HTTP-тести використовують чинний підставний Prisma, моделюють також
 конкурентні commits та конфлікти unique. Opt-in `tests/routines-postgres.test.ts`
 перевіряє збереження наявної Task при новій міграції, реальні unique/FK constraints,
 два конкурентні POST, гонки з паузою/конфігурацією/видаленням Routine та Area,
 і відкат усього набору через реальну помилку PostgreSQL trigger у журналі.
+Для AFTER_COMPLETION додатково перевірено реальні конкурентні POST наступника,
+гонки з reopen/DELETE останньої Task та автоматичним DONE від підзадач, унікальність
+номера й попередника, збереження nullable-полів старих календарних occurrences
+і повний відкат наступника після помилки журналу підзадачі. Більша матриця
+дат/DST, COUNT/UNTIL_DATE, пауз, статусів і пошкодженої історії перевіряється
+підставним Prisma у `tests/routines-completion.test.ts`.
 Тест створює й після завершення видаляє **лише власну нову випадкову schema**;
 усі старі міграції запускає тільки в ній. Дозволено лише localhost/127.0.0.1/::1.
 DATABASE_URL, DIRECT_URL і credentials із .env для цього тесту не використовуються.

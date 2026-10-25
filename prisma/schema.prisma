@@ -117,8 +117,14 @@ model RoutineOccurrence {
   createdAt     DateTime @default(now()) @db.Timestamptz(3)
   routine       Routine  @relation(fields: [routineId], references: [id], onDelete: Restrict)
   task          Task?
+  occurrenceNumber Int?
+  previousOccurrenceId String? @unique @db.Uuid
+  basisCompletedAt DateTime? @db.Timestamptz(3)
+  previousOccurrence RoutineOccurrence? @relation("CompletionChain", fields: [previousOccurrenceId], references: [id], onDelete: Restrict)
+  nextOccurrence RoutineOccurrence? @relation("CompletionChain")
 
   @@unique([routineId, occurrenceKey])
+  @@unique([routineId, occurrenceNumber])
 }
 
 model RoutineSubtask {

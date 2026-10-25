@@ -1,11 +1,12 @@
 import { Prisma, type PrismaClient, type TaskActionType } from "../../generated/prisma/client";
 import { getPrisma } from "../../lib/prisma";
 import { lockArea } from "../../lib/area-lock";
+import { lockTask } from "../../lib/task-lock";
 
 const taskInclude = {
   area: { select: { id: true, name: true } },
   routineOccurrence: { select: { id: true, routineId: true, occurrenceKey: true, startDate: true, endDate: true,
-    timezone: true, localTime: true, instant: true } },
+    timezone: true, localTime: true, instant: true, occurrenceNumber: true, previousOccurrenceId: true, basisCompletedAt: true } },
   subtasks: {
     where: { deletedAt: null },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -16,6 +17,11 @@ export type TaskWithSubtasks = Prisma.TaskGetPayload<{ include: typeof taskInclu
 
 export function createTaskQueries(db: Prisma.TransactionClient) {
   return {
+    lock(id: string) { return lockTask(db, id); },
+    findCompletionActions(taskId: string, take: number) {
+      return db.taskAction.findMany({ where: { taskId, type: { in: ["CREATED", "STATUS_CHANGED"] } },
+        orderBy: [{ timestamp: "asc" }, { id: "asc" }], take });
+    },
     findMany(where: Prisma.TaskWhereInput) {
       return db.task.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }], include: taskInclude });
     },
