@@ -13,6 +13,7 @@ import { toAreaSnapshot } from "../areas/areas.mapper";
 import { createTaskWithSubtasks } from "./tasks.creation";
 import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext } from "./tasks.today";
 import { verifiedTaskCompletion } from "./tasks.completion";
+import { isTaskBacklog } from "./tasks.backlog";
 
 export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
   async function assignableArea(id: string | null | undefined, tx: TasksTransactionRepository) {
@@ -41,6 +42,7 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
       return { ...task, completedAt,
         summary: calculateTaskSummary(task, actions, asOf),
         isToday: isTaskToday({ ...task, completedAt }, context, asOf),
+        isBacklog: isTaskBacklog(task, asOf),
       };
     });
   }
@@ -69,7 +71,9 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
         archivedAt: query.archived === "true" ? { not: null } : null,
       }), tx));
       const tasks = present(snapshot, query);
-      return query.view === "today" ? tasks.filter((task) => task.isToday) : tasks;
+      if (query.view === "today") return tasks.filter((task) => task.isToday);
+      if (query.view === "backlog") return tasks.filter((task) => task.isBacklog);
+      return tasks;
     },
     async get(id: string, context: Readonly<TaskTodayContext> = DEFAULT_TODAY_CONTEXT) {
       const snapshot = await transaction(async (tx) => summarize([await findTask(id, tx)], tx));

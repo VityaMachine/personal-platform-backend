@@ -1,5 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import type { Task, RoutineOccurrence } from "../../generated/prisma/client";
+import { daysSinceOccurrenceEnd, taskLocalDate } from "./tasks.calendar";
 
 export type TaskTodayContext = { timezone: string; overdueMode: "none" | "limited" | "all"; overdueDays: number };
 export const DEFAULT_TODAY_CONTEXT: Readonly<TaskTodayContext> = { timezone: "UTC", overdueMode: "limited", overdueDays: 3 };
@@ -12,14 +13,14 @@ export type TaskTodayInput = Pick<Task, "status" | "archivedAt" | "deletedAt" | 
 export function isTaskToday(task: TaskTodayInput, context: Readonly<TaskTodayContext>, now: Date): boolean {
   if (task.status === "CANCELED" || task.archivedAt !== null || task.deletedAt !== null) return false;
   const instant = Temporal.Instant.fromEpochMilliseconds(now.getTime());
-  const today = instant.toZonedDateTimeISO(context.timezone).toPlainDate();
+  const today = taskLocalDate(instant, context.timezone);
   if (task.status === "DONE") {
     return task.completedAt !== null
-      && Temporal.Instant.from(task.completedAt).toZonedDateTimeISO(context.timezone).toPlainDate().equals(today);
+      && taskLocalDate(Temporal.Instant.from(task.completedAt), context.timezone).equals(today);
   }
   function matchesDate(value: Date | null): boolean {
     if (value === null) return false;
-    const date = Temporal.Instant.fromEpochMilliseconds(value.getTime()).toZonedDateTimeISO(context.timezone).toPlainDate();
+    const date = taskLocalDate(Temporal.Instant.fromEpochMilliseconds(value.getTime()), context.timezone);
     const difference = date.until(today).days;
     if (difference < 0) return false;
     return context.overdueMode === "all" || (context.overdueMode === "none" ? difference === 0 : difference <= context.overdueDays);
@@ -29,9 +30,9 @@ export function isTaskToday(task: TaskTodayInput, context: Readonly<TaskTodayCon
   if (task.plannedAt !== null) return matchesDate(task.plannedAt);
   const occurrence = task.routineOccurrence;
   if (occurrence === null) return false;
-  const occurrenceToday = instant.toZonedDateTimeISO(occurrence.timezone).toPlainDate();
+  const occurrenceToday = taskLocalDate(instant, occurrence.timezone);
   if (Temporal.PlainDate.compare(occurrenceToday, occurrence.startDate) < 0) return false;
-  const overdueDays = Temporal.PlainDate.from(occurrence.endDate).until(occurrenceToday).days;
+  const overdueDays = daysSinceOccurrenceEnd(occurrence, instant);
   if (overdueDays <= 0) return true;
   return context.overdueMode === "all" || (context.overdueMode === "limited" && overdueDays <= context.overdueDays);
 }

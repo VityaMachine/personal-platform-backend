@@ -142,6 +142,7 @@ DTO підзадач, відсортованими за `createdAt ASC`, пот�
 | `GET /api/tasks?archived=true` | Лише архівовані й невидалені задачі |
 | `GET /api/tasks?archived=false` | Звичайний список |
 | `GET /api/tasks?view=today` | Лише задачі з обчисленим `isToday: true`, звичайний масив |
+| `GET /api/tasks?view=backlog` | Задачі, що потребують нового плану: `isBacklog: true`, звичайний масив |
 | `GET /api/tasks/:id` | Одна невидалена задача, включно з архівованою |
 | `PATCH /api/tasks/:id` | Редагування полів, статусу та/або архіву |
 | `DELETE /api/tasks/:id` | Встановлення `deletedAt`, відповідь `204` |
@@ -1415,10 +1416,111 @@ Error handler додає до того самого запису безпечн�
 JSON у stdout, без завантаження `pino-pretty`; інші значення `NODE_ENV` також дають JSON.
 Для production задавайте `NODE_ENV=production`, зокрема при `npm ci --omit=dev`.
 
+## «Беклог»: isBacklog і view=backlog
+
+Беклог — збережені задачі, які потребують нового плану. `GET /api/tasks?view=backlog`
+повертає звичайний масив у чинному порядку `createdAt DESC, id DESC`, відфільтрований
+за `isBacklog=true`. Без view список працює як раніше; `view=today` зберігає свої правила.
+Невідомий або повторений view → `400`. `archived=false&view=backlog` дозволене;
+`archived=true&view=backlog` та `archived=true&view=today` → `400`.
+view підтримується лише в GET списку.
+
+Task входить у беклог, **лише якщо одночасно**:
+
+- status — `TODO`, `PAUSED` або `POSTPONED`; `IN_PROGRESS`, `DONE`, `CANCELED` виключені;
+- archivedAt і deletedAt — null;
+- dueAt відсутній або `dueAt <= now`;
+- plannedAt відсутній або `plannedAt <= now`;
+- routineOccurrence відсутній або його календарне вікно вже закінчилося.
+
+plannedAt/dueAt порівнюються як UTC instants: рівно now допускається, будь-яке майбутнє
+значення хоча б одного поля виключає Task, навіть якщо інше поле або occurrence у минулому.
+Без обох дат і без occurrence Task дозволеного статусу входить у беклог.
+
+startDate/endDate occurrence — локальні календарні дати **timezone occurrence**.
+Вікно закінчилося лише коли локальна дата now строго більша за endDate.
+Майбутнє й активне вікно виключають Task навіть із минулими особистими датами.
+Останній день вікна включно ще не прострочений; localTime та instant не скорочують
+його. Наприклад, вікно 15–23 жовтня в Europe/Kyiv входить у беклог з локальної
+півночі 24 жовтня, якщо решта умов виконані. DST враховується календарною арифметикою
+Temporal; фіксовані 24 години та штучний timestamp кінця дня не використовуються.
+Пауза/видалення шаблону Routine не змінюють відбір створеної Task: поточний шаблон
+для цього не завантажується.
+
+`timezone` запиту, `overdueMode` та `overdueDays` не впливають на isBacklog, але й далі
+валідуються за спільними правилами контексту. Вони впливають лише на isToday.
+Беклог може перетинатися зі «Сьогодні»: TODO з dueAt рівно now та без occurrence
+може мати `isToday=true` й `isBacklog=true` одночасно. Відбір не вимагає isToday=false.
+
+Усі повні Task DTO (GET списку/деталей, POST, PATCH) містять обчислюваний boolean
+`isBacklog`, без колонки БД. Чистий `tasks.backlog.ts` отримує явний now. isBacklog,
+isToday, completedAt і summary використовують один instant на всю відповідь після
+успішної транзакції, також після повторних спроб. completedAt, summary, area,
+subtasks, routineOccurrence та isCompleted зберігають чинну семантику.
+Автоматичні зміни статусу батька від підзадач враховуються в наступному GET Task.
+GET не створює записів, occurrence чи подій: використовується наявний snapshot і
+один пакетний запит історії summary без N+1 та додаткових запитів історії.
+Клієнт не передає isBacklog або now/date/asOf — такі поля відхиляються з `400`.
+
+### Postman: беклог і новий особистий план
+
+`baseUrl` — наприклад `http://localhost:3000`. POST, Body → raw → JSON:
+
+```http
+POST {{baseUrl}}/api/tasks
+Content-Type: application/json
+
+{
+  "title": "Потребує нового плану",
+  "dueAt": "2020-01-01T12:00:00Z",
+  "estimatedDurationMinutes": 15
+}
+```
+
+Збережіть id як `taskId`. Якщо серверний now пізніше цієї дати, POST поверне
+isBacklog=true, completedAt=null. GET без body:
+
+```http
+GET {{baseUrl}}/api/tasks/{{taskId}}
+GET {{baseUrl}}/api/tasks?view=backlog
+GET {{baseUrl}}/api/tasks?view=backlog&timezone=Europe%2FKyiv&overdueMode=none&overdueDays=1
+GET {{baseUrl}}/api/tasks?view=backlog&timezone=America%2FLos_Angeles&overdueMode=all&overdueDays=365
+GET {{baseUrl}}/api/tasks?view=today&overdueMode=all
+```
+
+Обидва контексти беклогу містять ту саму Task; останній GET демонструє перетин зі
+«Сьогодні» для цього минулого dueAt. Решта isToday у DTO може відрізнятися за контекстом.
+Призначте майбутній особистий план (дату за потреби замініть на майбутню щодо сервера):
+
+```http
+PATCH {{baseUrl}}/api/tasks/{{taskId}}
+Content-Type: application/json
+
+{ "plannedAt": "2099-01-01T09:00:00Z" }
+```
+
+PATCH та наступні GET повернуть isBacklog=false; список беклогу більше не містить Task,
+хоча dueAt залишився минулим. PATCH `{ "plannedAt": null, "dueAt": null }` поверне
+її у беклог. PATCH `{ "status": "IN_PROGRESS" }` виключить, `{ "status": "PAUSED" }`
+поверне, а `{ "status": "DONE" }` виключить і збереже чинний розрахунок completedAt.
+
+```http
+GET {{baseUrl}}/api/tasks?archived=false&view=backlog
+GET {{baseUrl}}/api/tasks?archived=true&view=backlog
+GET {{baseUrl}}/api/tasks?archived=true&view=today
+GET {{baseUrl}}/api/tasks?view=unknown
+```
+
+Перший запит → `200` і масив, решта → `400`.
+Для збереженого Routine з вікном 15–23 перевірте GET деталей і view=backlog в останній
+локальний день та після півночі наступного дня timezone occurrence: false → true.
+Після паузи/видалення шаблону результат той самий. Майбутній plannedAt Task знову
+виключає її. Час для ручної перевірки визначає сервер; query-підміни now немає.
+
 ## «Сьогодні»: isToday і view=today
 
 Усі повні Task DTO у GET списку, GET деталей, POST та PATCH містять boolean
-`isToday` і `completedAt: ISO string | null`. Обидва поля обчислювані, без колонок БД.
+`isToday`, `isBacklog` і `completedAt: ISO string | null`. Усі три поля обчислювані, без колонок БД.
 area, subtasks, routineOccurrence,
 summary, isCompleted та всі чинні поля збережені. Підзадачі окремого isToday не мають.
 

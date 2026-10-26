@@ -61,8 +61,8 @@ export const taskContextQuerySchema = z.strictObject({
 });
 export const listTasksSchema = taskContextQuerySchema.extend({
   archived: z.enum(["true", "false"]).optional(),
-  view: z.literal("today").optional(),
-}).refine((query) => query.archived !== "true" || query.view !== "today", "archived=true cannot be combined with view=today.");
+  view: z.enum(["today", "backlog"]).optional(),
+}).refine((query) => query.archived !== "true" || query.view === undefined, "archived=true cannot be combined with view=today or view=backlog.");
 
 // Keep the existing id error message instead of the generic Zod error response.
 export const taskIdSchema = z.unknown().transform((id) => {
