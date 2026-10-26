@@ -37,6 +37,8 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   const migrations = (await readdir(directory, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
   const ordinaryId = randomUUID();
   const legacyRoutineId = randomUUID(), legacyOccurrenceId = randomUUID();
+  const legacyFirstId = randomUUID(), legacySuccessorId = randomUUID();
+  const legacyBasis = "2026-01-02T12:00:00.000Z";
   for (const migration of migrations) {
     if (migration === "20261025120000_routine_occurrences") {
       await sql.query('INSERT INTO "Task" ("id", "title", "estimatedDurationMinutes", "updatedAt") VALUES ($1, $2, 10, now())', [ordinaryId, "Existing ordinary task"]);
@@ -47,11 +49,34 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
       await sql.query(`INSERT INTO "RoutineOccurrence" ("id", "routineId", "occurrenceKey", "startDate", "endDate", "timezone", "snapshot")
         VALUES ($1, $2, 'legacy-calendar-key', '2026-01-01', '2026-01-01', 'UTC', '{}')`, [legacyOccurrenceId, legacyRoutineId]);
     }
+    if (migration === "20261026120000_task_skipped") {
+      // Seed the old schema before the additive migration: both first and successor must survive.
+      await sql.query(`INSERT INTO "RoutineOccurrence"
+        ("id", "routineId", "occurrenceKey", "startDate", "endDate", "timezone", "snapshot", "occurrenceNumber", "previousOccurrenceId", "basisCompletedAt")
+        VALUES ($1, $3, 'legacy-completion-1', '2026-01-01', '2026-01-01', 'UTC', '{}', 1, NULL, NULL),
+          ($2, $3, 'legacy-completion-2', '2026-01-04', '2026-01-04', 'UTC', '{}', 2, $1, $4)`,
+      [legacyFirstId, legacySuccessorId, legacyRoutineId, legacyBasis]);
+    }
     await sql.query(await readFile(path.join(directory, migration, "migration.sql"), "utf8"));
   }
   assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: ordinaryId } })).routineOccurrenceId, null);
   const legacy = await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: legacyOccurrenceId } });
   assert.equal(legacy.occurrenceNumber, null); assert.equal(legacy.previousOccurrenceId, null); assert.equal(legacy.basisCompletedAt, null);
+  assert.equal(legacy.basisType, null); assert.equal(legacy.basisAt, null);
+  const oldFirst = await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: legacyFirstId } });
+  assert.equal(oldFirst.basisType, null); assert.equal(oldFirst.basisAt, null);
+  const oldSuccessor = await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: legacySuccessorId } });
+  assert.equal(oldSuccessor.basisType, "COMPLETED"); assert.equal(oldSuccessor.basisAt!.toISOString(), legacyBasis);
+  assert.equal(oldSuccessor.basisCompletedAt!.toISOString(), legacyBasis);
+  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: ordinaryId } })).skipNote, null);
+  await assert.rejects(sql.query('UPDATE "Task" SET "status" = \'SKIPPED\' WHERE "id" = $1', [ordinaryId]),
+    (error: { code?: string }) => error.code === "23514");
+  for (const invalid of [
+    'UPDATE "RoutineOccurrence" SET "basisType" = NULL WHERE "id" = $1',
+    'UPDATE "RoutineOccurrence" SET "basisAt" = NULL WHERE "id" = $1',
+    'UPDATE "RoutineOccurrence" SET "basisType" = \'SKIPPED\' WHERE "id" = $1',
+    'UPDATE "RoutineOccurrence" SET "basisCompletedAt" = "basisAt" + interval \'1 second\' WHERE "id" = $1',
+  ]) await assert.rejects(sql.query(invalid, [legacySuccessorId]), (error: { code?: string }) => error.code === "23514");
   const app = express(); app.use(express.json());
   app.use("/api/routines", createRoutinesRouter(() => prisma));
   app.use("/api/tasks", createTasksRouter(() => prisma));
@@ -187,6 +212,7 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   assert.deepEqual(successors.map((response) => response.body.createdCount).sort(), [0, 1]);
   const second = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: completion.id, occurrenceNumber: 2 }, include: { task: true } });
   assert.equal(second.basisCompletedAt!.toISOString(), done.timestamp.toISOString());
+  assert.equal(second.basisType, "COMPLETED"); assert.equal(second.basisAt!.toISOString(), done.timestamp.toISOString());
   assert.equal(second.startDate, nextDate);
   const successorWinner = successors.findIndex((response) => response.body.createdCount === 1);
   assert.equal(second.task!.plannedAt!.toISOString(), new Date(plans[successorWinner]).toISOString());
@@ -250,4 +276,61 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   assert.equal((await request("POST", `/routines/${failingCompletion.id}/generate`, completionRange)).status, 500);
   assert.equal(await prisma.routineOccurrence.count({ where: { routineId: failingCompletion.id } }), 1);
   assert.deepEqual({ tasks: await prisma.task.count(), children: await prisma.subtask.count(), actions: await prisma.taskAction.count() }, beforeFailure);
+
+  const skipRoutine = (await request("POST", "/routines", { ...completionInput,
+    title: "Skip chain", subtasks: [{ title: "Remain TODO", estimatedDurationMinutes: 5 }] })).body;
+  const skipFirst = (await request("POST", `/routines/${skipRoutine.id}/generate`, { from: "2026-01-01", to: "2026-01-01" })).body.created[0];
+  const skipChild = await prisma.subtask.findFirstOrThrow({ where: { taskId: skipFirst.taskId } });
+  await assert.rejects(sql.query('UPDATE "Subtask" SET "status" = \'SKIPPED\' WHERE "id" = $1', [skipChild.id]),
+    (error: { code?: string }) => error.code === "23514");
+  const [skipMutation, skipGeneration] = await Promise.all([
+    request("PATCH", `/tasks/${skipFirst.taskId}`, { status: "SKIPPED", skipNote: "  Local DB skip  " }),
+    request("POST", `/routines/${skipRoutine.id}/generate`, completionRange),
+  ]);
+  assert.equal(skipMutation.status, 200); assert.ok([200, 409].includes(skipGeneration.status), JSON.stringify(skipGeneration));
+  assert.equal(skipMutation.body.skipNote, "Local DB skip"); assert.equal(skipMutation.body.completedAt, null);
+  const skipAction = await prisma.taskAction.findFirstOrThrow({ where: { taskId: skipFirst.taskId, type: "STATUS_CHANGED" } });
+  assert.equal(skipMutation.body.skippedAt, skipAction.timestamp.toISOString());
+  assert.equal((await prisma.subtask.findUniqueOrThrow({ where: { id: skipChild.id } })).status, "TODO");
+  const skipDate = Temporal.Instant.from(skipAction.timestamp.toISOString()).toZonedDateTimeISO("Europe/Kyiv").toPlainDate().add({ days: 2 }).toString();
+  const skipRange = { from: skipDate, to: skipDate };
+  const skipSuccessors = await Promise.all([1, 2].map(() => request("POST", `/routines/${skipRoutine.id}/generate`, skipRange)));
+  assert.ok(skipSuccessors.every((response) => response.status === 200), JSON.stringify(skipSuccessors));
+  assert.equal(await prisma.routineOccurrence.count({ where: { routineId: skipRoutine.id } }), 2);
+  const skipNext = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: skipRoutine.id, occurrenceNumber: 2 }, include: { task: true } });
+  assert.equal(skipNext.basisType, "SKIPPED"); assert.equal(skipNext.basisAt!.toISOString(), skipAction.timestamp.toISOString());
+  assert.equal(skipNext.basisCompletedAt, null); assert.equal(skipNext.startDate, skipDate);
+  for (const status of ["DONE", "SKIPPED", "TODO"] as const) {
+    const result = await request("PATCH", `/tasks/${skipFirst.taskId}`, { status });
+    assert.equal(result.status, 200);
+    assert.equal((await request("POST", `/routines/${skipRoutine.id}/generate`, skipRange)).body.createdCount, 0);
+    assert.deepEqual(await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: skipNext.id }, include: { task: true } }), skipNext);
+  }
+  // Race reopening the latest skipped execution against generation under real row locks.
+  await request("PATCH", `/tasks/${skipNext.task!.id}`, { status: "SKIPPED" });
+  const latestSkipAction = await prisma.taskAction.findFirstOrThrow({ where: { taskId: skipNext.task!.id, type: "STATUS_CHANGED" } });
+  const raceDate = Temporal.Instant.from(latestSkipAction.timestamp.toISOString()).toZonedDateTimeISO("Europe/Kyiv").toPlainDate().add({ days: 2 }).toString();
+  const [skipReopen, skipContinuation] = await Promise.all([
+    request("PATCH", `/tasks/${skipNext.task!.id}`, { status: "TODO" }),
+    request("POST", `/routines/${skipRoutine.id}/generate`, { from: raceDate, to: raceDate }),
+  ]);
+  assert.equal(skipReopen.status, 200); assert.ok([200, 409].includes(skipContinuation.status), JSON.stringify(skipContinuation));
+  assert.equal(await prisma.routineOccurrence.count({ where: { routineId: skipRoutine.id } }), skipContinuation.body.createdCount === 1 ? 3 : 2);
+  if (skipContinuation.body.createdCount === 1) {
+    const third = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: skipRoutine.id, occurrenceNumber: 3 } });
+    assert.equal(third.basisType, "SKIPPED"); assert.equal(third.basisAt!.toISOString(), latestSkipAction.timestamp.toISOString());
+  }
+
+  const rollbackRoutine = (await request("POST", "/routines", { ...completionInput, title: "Skip rollback" })).body;
+  const rollbackId = (await request("POST", `/routines/${rollbackRoutine.id}/generate`, { from: "2026-01-01", to: "2026-01-01" })).body.created[0].taskId;
+  await sql.query(`CREATE FUNCTION fail_skip_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+    IF NEW."type" = 'STATUS_CHANGED' AND NEW."metadata"->'after'->>'status' = 'SKIPPED'
+      AND EXISTS (SELECT 1 FROM "Task" WHERE "id" = NEW."taskId" AND "title" = 'Skip rollback')
+    THEN RAISE EXCEPTION 'test skip journal failure'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER fail_skip_event BEFORE INSERT ON "TaskAction" FOR EACH ROW EXECUTE FUNCTION fail_skip_event();`);
+  const beforeSkipFailure = await prisma.task.findUniqueOrThrow({ where: { id: rollbackId } });
+  const beforeSkipActions = await prisma.taskAction.count({ where: { taskId: rollbackId } });
+  assert.equal((await request("PATCH", `/tasks/${rollbackId}`, { status: "SKIPPED", skipNote: "Rollback" })).status, 500);
+  assert.deepEqual(await prisma.task.findUniqueOrThrow({ where: { id: rollbackId } }), beforeSkipFailure);
+  assert.equal(await prisma.taskAction.count({ where: { taskId: rollbackId } }), beforeSkipActions);
 });

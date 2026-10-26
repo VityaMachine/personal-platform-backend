@@ -37,7 +37,9 @@ export function createSubtasksService({ findTask, transaction }: Dependencies) {
       subtasks.some((subtask) => subtask.status === "TODO") &&
       parent.status !== "PAUSED" && parent.status !== "POSTPONED") status = "IN_PROGRESS";
     if (duration === parent.estimatedDurationMinutes && status === parent.status) return;
-    const updated = await tx.update(parent.id, { estimatedDurationMinutes: duration, status });
+    const updated = await tx.update(parent.id, { estimatedDurationMinutes: duration, status,
+      ...(parent.status === "SKIPPED" && status !== "SKIPPED" ? { skipNote: null } : {}),
+    });
     if (duration !== parent.estimatedDurationMinutes) {
       await tx.createAction(parent.id, "EDITED", {
         subtaskId,
@@ -48,8 +50,10 @@ export function createSubtasksService({ findTask, transaction }: Dependencies) {
     if (status !== parent.status) {
       await tx.createAction(parent.id, "STATUS_CHANGED", {
         subtaskId,
-        before: { status: parent.status, cancellationNote: parent.cancellationNote },
-        after: { status: updated.status, cancellationNote: updated.cancellationNote },
+        before: { status: parent.status, cancellationNote: parent.cancellationNote,
+          ...(parent.status === "SKIPPED" ? { skipNote: parent.skipNote } : {}) },
+        after: { status: updated.status, cancellationNote: updated.cancellationNote,
+          ...(parent.status === "SKIPPED" ? { skipNote: updated.skipNote } : {}) },
       });
     }
   }

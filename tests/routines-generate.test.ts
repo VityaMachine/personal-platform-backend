@@ -38,10 +38,12 @@ test("massage generates seven Tasks with stable occurrence keys, null personal d
     assert.equal(task.routineOccurrence.routineId, r.id);
     assert.equal(task.routineOccurrence.timezone, "Europe/Kyiv");
     assert.equal(task.routineOccurrence.localTime, "18:00");
-    assert.equal(Object.keys(task.routineOccurrence).length, 11);
+    assert.equal(Object.keys(task.routineOccurrence).length, 13);
     assert.equal(task.routineOccurrence.occurrenceNumber, null);
     assert.equal(task.routineOccurrence.previousOccurrenceId, null);
     assert.equal(task.routineOccurrence.basisCompletedAt, null);
+    assert.equal(task.routineOccurrence.basisType, null);
+    assert.equal(task.routineOccurrence.basisAt, null);
     assert.equal("snapshot" in task.routineOccurrence, false);
     assert.equal("routineOccurrenceId" in task, false);
     assert.deepEqual(f.state().occurrences.find((entry) => entry.id === task.routineOccurrence.id)!.snapshot, r);

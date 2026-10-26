@@ -96,7 +96,7 @@ test("repeat/network retry ignores changed planning for existing, DONE and delet
   const preview = await f.routineRequest("GET", `/${r.id}/generation-preview${rangeQuery}`);
   assert.ok(preview.body.occurrences.every((entry: Preview) => entry.existing));
   for (const entry of preview.body.occurrences) {
-    assert.deepEqual(Object.keys(entry).sort(), ["occurrenceKey", "startDate", "endDate", "timezone", "localTime", "instant", "diagnostics", "existing"].sort());
+    assert.deepEqual(Object.keys(entry).sort(), ["occurrenceKey", "startDate", "endDate", "timezone", "localTime", "instant", "diagnostics", "existing", "basisType", "basisAt", "basisCompletedAt"].sort());
   }
   assert.equal((await f.request("GET", `/${first.created[1].taskId}`)).status, 404);
   assert.deepEqual(f.state(), before);

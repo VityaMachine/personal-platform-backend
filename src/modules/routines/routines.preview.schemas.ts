@@ -15,6 +15,8 @@ export const routinePreviewQuerySchema = z.strictObject({
   limit: integerQuery.pipe(z.number().int().min(1).max(500)).default(100),
   completedAt: completionPreviewContextSchema.shape.completedAt.optional(),
   completedOccurrenceNumber: integerQuery.pipe(completionPreviewContextSchema.shape.completedOccurrenceNumber).optional(),
+  skippedAt: completionPreviewContextSchema.shape.completedAt.optional(),
+  skippedOccurrenceNumber: integerQuery.pipe(completionPreviewContextSchema.shape.completedOccurrenceNumber).optional(),
 }).superRefine((value, ctx) => {
   if (value.from > value.to) ctx.addIssue({ code: "custom", message: "from must not exceed to." });
   else if (localDateSchema.safeParse(value.from).success && localDateSchema.safeParse(value.to).success
@@ -23,6 +25,13 @@ export const routinePreviewQuerySchema = z.strictObject({
   }
   if ((value.completedAt === undefined) !== (value.completedOccurrenceNumber === undefined)) {
     ctx.addIssue({ code: "custom", message: "completedAt and completedOccurrenceNumber must be supplied together." });
+  }
+  if ((value.skippedAt === undefined) !== (value.skippedOccurrenceNumber === undefined)) {
+    ctx.addIssue({ code: "custom", message: "skippedAt and skippedOccurrenceNumber must be supplied together." });
+  }
+  if ((value.completedAt !== undefined || value.completedOccurrenceNumber !== undefined)
+    && (value.skippedAt !== undefined || value.skippedOccurrenceNumber !== undefined)) {
+    ctx.addIssue({ code: "custom", message: "Send either completion or skip context, never both." });
   }
 });
 export type RoutinePreviewQuery = z.output<typeof routinePreviewQuerySchema>;

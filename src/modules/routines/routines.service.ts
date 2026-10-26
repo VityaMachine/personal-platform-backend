@@ -56,6 +56,9 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
         const { routine, candidates } = await resolveGeneration(id, range, tx);
         return { routineId: id, timezone: routine.timezone, ...range,
           occurrences: candidates.map((entry) => ({ ...entry.occurrence,
+            basisType: entry.chain?.basisType ?? null,
+            basisAt: entry.chain?.basisAt?.toISOString() ?? null,
+            basisCompletedAt: entry.chain?.basisCompletedAt?.toISOString() ?? null,
             instant: entry.occurrence.instant === null ? null : new Date(entry.occurrence.instant).toISOString(),
             existing: entry.existingTaskId !== null })) };
       });
@@ -87,7 +90,7 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
     preview(id: string, query: RoutinePreviewQuery) {
       return transaction(async (tx) => {
         const routine = await find(id, tx);
-        if (query.completedAt !== undefined && routine.schedule.recurrence.type !== "AFTER_COMPLETION") {
+        if ((query.completedAt !== undefined || query.skippedAt !== undefined) && routine.schedule.recurrence.type !== "AFTER_COMPLETION") {
           throw new ApiError(400, "Completion context requires AFTER_COMPLETION.");
         }
         const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
@@ -98,7 +101,9 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
         }
         try {
           return calculateRoutinePreview(routine, query.from, query.to, query.limit, { ...history,
-            completionContext: query.completedAt === undefined ? undefined : {
+            completionContext: query.skippedAt !== undefined ? {
+              completedAt: query.skippedAt, completedOccurrenceNumber: query.skippedOccurrenceNumber!,
+            } : query.completedAt === undefined ? undefined : {
               completedAt: query.completedAt, completedOccurrenceNumber: query.completedOccurrenceNumber!,
             } });
         } catch (error) {

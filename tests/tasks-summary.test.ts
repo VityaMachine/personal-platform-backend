@@ -132,3 +132,17 @@ test("absolute timestamps, nonnegative integer seconds and immutable inputs", ()
   assert.equal(invalid.inProgressSeconds, null);
   assert.equal(invalid.historyIncomplete, true);
 });
+
+test("SKIPPED stops age, excludes skipped intervals and resumes/re-skips without adding a working status", () => {
+  const actions = [created(), transition(10, "TODO", "IN_PROGRESS"), transition(30, "IN_PROGRESS", "SKIPPED")];
+  const skipped = summary("SKIPPED", actions);
+  assert.equal(skipped.ageSeconds, 30); assert.equal(skipped.timeToCompletionSeconds, null);
+  assert.deepEqual(skipped.statusDurationsSeconds, { TODO: 10, IN_PROGRESS: 20, PAUSED: 0, POSTPONED: 0 });
+  assert.equal(skipped.historyIncomplete, false);
+  const reopened = [...actions, transition(60, "SKIPPED", "TODO")];
+  assert.equal(summary("TODO", reopened).ageSeconds, 100);
+  assert.deepEqual(summary("TODO", reopened).statusDurationsSeconds, { TODO: 50, IN_PROGRESS: 20, PAUSED: 0, POSTPONED: 0 });
+  const again = summary("SKIPPED", [...reopened, transition(80, "TODO", "SKIPPED")]);
+  assert.equal(again.ageSeconds, 80); assert.equal(again.statusDurationsSeconds.TODO, 30);
+  assert.equal(summary("SKIPPED", [created("SKIPPED")]).ageSeconds, null, "initial state is not a real skip transition");
+});

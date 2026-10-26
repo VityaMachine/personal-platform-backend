@@ -52,7 +52,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
     assert.deepEqual(include, {
       area: { select: { id: true, name: true } },
       routineOccurrence: { select: { id: true, routineId: true, occurrenceKey: true, startDate: true, endDate: true,
-        timezone: true, localTime: true, instant: true, occurrenceNumber: true, previousOccurrenceId: true, basisCompletedAt: true } },
+        timezone: true, localTime: true, instant: true, occurrenceNumber: true, previousOccurrenceId: true, basisCompletedAt: true, basisType: true, basisAt: true } },
       subtasks: { where: { deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
     });
     return structuredClone({
@@ -146,7 +146,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
             return task ? { id: task.id } : null;
           })() }));
       },
-      async create({ data }: { data: Omit<RoutineOccurrence, "id" | "createdAt" | "occurrenceNumber" | "previousOccurrenceId" | "basisCompletedAt"> & Partial<RoutineOccurrence> }) {
+      async create({ data }: { data: Omit<RoutineOccurrence, "id" | "createdAt" | "occurrenceNumber" | "previousOccurrenceId" | "basisCompletedAt" | "basisType" | "basisAt"> & Partial<RoutineOccurrence> }) {
         operations.push(`occurrence-create:${data.routineId}`);
         if (occurrencesBeforeFailure !== undefined && occurrencesBeforeFailure-- <= 0) throw new Error("Simulated occurrence write failure");
         if (occurrenceConflicts-- > 0 || db.occurrences.some((entry) => entry.routineId === data.routineId && entry.occurrenceKey === data.occurrenceKey)
@@ -157,7 +157,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
           });
         }
         assert.ok(db.routines.some((routine) => routine.id === data.routineId));
-        const entry = { occurrenceNumber: null, previousOccurrenceId: null, basisCompletedAt: null, ...data, id: randomUUID(), createdAt: now() };
+        const entry = { occurrenceNumber: null, previousOccurrenceId: null, basisCompletedAt: null, basisType: null, basisAt: null, ...data, id: randomUUID(), createdAt: now() };
         db.occurrences.push(entry);
         return structuredClone(entry);
       },
@@ -282,7 +282,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
           areaId: null,
           routineOccurrenceId: null,
           plannedAt: null, dueAt: null, estimatedDurationMinutes: 1,
-          cancellationNote: null, archivedAt: null, deletedAt: null,
+          cancellationNote: null, skipNote: null, archivedAt: null, deletedAt: null,
           createdAt: now(), updatedAt: now(), ...data,
         };
         db.tasks.push(task);

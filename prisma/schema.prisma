@@ -15,6 +15,12 @@ enum TaskStatus {
   POSTPONED
   DONE
   CANCELED
+  SKIPPED
+}
+
+enum RoutineBasisType {
+  COMPLETED
+  SKIPPED
 }
 
 enum TaskPriority {
@@ -48,6 +54,7 @@ model Task {
   dueAt                    DateTime?  @db.Timestamptz(3)
   estimatedDurationMinutes Int
   cancellationNote         String?    @db.Text
+  skipNote                 String?    @db.VarChar(2000)
   archivedAt               DateTime?  @db.Timestamptz(3)
   deletedAt                DateTime?  @db.Timestamptz(3)
   createdAt                DateTime   @default(now()) @db.Timestamptz(3)
@@ -120,6 +127,8 @@ model RoutineOccurrence {
   occurrenceNumber Int?
   previousOccurrenceId String? @unique @db.Uuid
   basisCompletedAt DateTime? @db.Timestamptz(3)
+  basisType RoutineBasisType?
+  basisAt DateTime? @db.Timestamptz(3)
   previousOccurrence RoutineOccurrence? @relation("CompletionChain", fields: [previousOccurrenceId], references: [id], onDelete: Restrict)
   nextOccurrence RoutineOccurrence? @relation("CompletionChain")
 

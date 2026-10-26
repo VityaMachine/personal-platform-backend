@@ -6,7 +6,7 @@ import { lockTask } from "../../lib/task-lock";
 const taskInclude = {
   area: { select: { id: true, name: true } },
   routineOccurrence: { select: { id: true, routineId: true, occurrenceKey: true, startDate: true, endDate: true,
-    timezone: true, localTime: true, instant: true, occurrenceNumber: true, previousOccurrenceId: true, basisCompletedAt: true } },
+    timezone: true, localTime: true, instant: true, occurrenceNumber: true, previousOccurrenceId: true, basisCompletedAt: true, basisType: true, basisAt: true } },
   subtasks: {
     where: { deletedAt: null },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],

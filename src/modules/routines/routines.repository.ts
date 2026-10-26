@@ -18,7 +18,7 @@ export function createRoutineQueries(db: Prisma.TransactionClient) {
     findCompletionChain(routineId: string, take: number) {
       return db.routineOccurrence.findMany({ where: { routineId }, orderBy: { occurrenceNumber: "asc" }, take,
         select: { id: true, routineId: true, occurrenceKey: true, occurrenceNumber: true, previousOccurrenceId: true,
-          basisCompletedAt: true, startDate: true, endDate: true, timezone: true, localTime: true, instant: true,
+          basisCompletedAt: true, basisType: true, basisAt: true, startDate: true, endDate: true, timezone: true, localTime: true, instant: true,
           task: { select: { id: true } } } });
     },
     findOccurrences(routineId: string, occurrenceKeys: string[]) {

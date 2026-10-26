@@ -1,11 +1,10 @@
 import { z } from "zod";
-import { TaskStatus } from "../../generated/prisma/client";
 import { ApiError } from "../../lib/api-error";
 import { taskFields } from "./tasks.fields";
 
 const fields = {
   title: taskFields.title,
-  status: z.enum(TaskStatus),
+  status: z.enum(["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED", "DONE", "CANCELED"]),
   estimatedDurationMinutes: taskFields.duration,
   cancellationNote: taskFields.note,
 };

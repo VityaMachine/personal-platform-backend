@@ -11,7 +11,7 @@ export type TaskTodayInput = Pick<Task, "status" | "archivedAt" | "deletedAt" | 
 
 /** Calendar selection only: no clock, I/O, summary dependency or current Routine lookup. */
 export function isTaskToday(task: TaskTodayInput, context: Readonly<TaskTodayContext>, now: Date): boolean {
-  if (task.status === "CANCELED" || task.archivedAt !== null || task.deletedAt !== null) return false;
+  if (task.status === "CANCELED" || task.status === "SKIPPED" || task.archivedAt !== null || task.deletedAt !== null) return false;
   const instant = Temporal.Instant.fromEpochMilliseconds(now.getTime());
   const today = taskLocalDate(instant, context.timezone);
   if (task.status === "DONE") {

@@ -47,6 +47,7 @@ export const updateTaskSchema = z.strictObject({
   dueAt: dateTime.nullable().optional(),
   estimatedDurationMinutes: duration.optional(),
   cancellationNote: note.optional(),
+  skipNote: z.string().trim().min(1).max(2000).nullable().optional(),
   archived: z.boolean().optional(),
 }).refine((data) => Object.keys(data).length > 0, "At least one field is required.")
   .refine((data) => data.status === undefined || data.isCompleted === undefined,

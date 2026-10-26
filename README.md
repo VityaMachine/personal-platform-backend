@@ -149,14 +149,15 @@ DTO підзадач, відсортованими за `createdAt ASC`, пот�
 | `GET /api/tasks/:id/history` | Журнал невидаленої задачі, старі події спочатку |
 
 PATCH приймає `title`, `description`, `status`, `priority`, `plannedAt`, `dueAt`,
-`estimatedDurationMinutes`, `cancellationNote`, `archived`. Невідомі поля та
+`estimatedDurationMinutes`, `cancellationNote`, `skipNote`, `archived`. Невідомі поля та
 порожній PATCH відхиляються. `description`, `plannedAt` і `dueAt` можна очистити
 через `null`; при створенні задачі дати не можуть бути `null`.
 
-Статуси: `TODO`, `IN_PROGRESS`, `PAUSED`, `POSTPONED`, `DONE`, `CANCELED`.
+Статуси: `TODO`, `IN_PROGRESS`, `PAUSED`, `POSTPONED`, `DONE`, `CANCELED`, `SKIPPED`.
+`SKIPPED` доступний лише вже створеній Routine Task; контракт пропуску наведено нижче.
 Переходи між ними дозволені; `CANCELED` вимагає в тому самому запиті непорожню
 `cancellationNote` (пробіли по краях обрізаються). Причина зберігається в задачі
-та metadata події зміни статусу; наступні зміни статусу не стирають її.
+та metadata події зміни статусу; наступні зміни статусу зберігають її, крім входу в SKIPPED.
 При переході в `POSTPONED` без `plannedAt` попередня дата планування очищається.
 Непереданий `dueAt` зберігається, а явний `dueAt: null` очищає дедлайн.
 
@@ -181,6 +182,144 @@ PATCH, що змінює кілька незалежних аспектів за
 Помилки валідації повертають `400` з `error.message` та `error.details`,
 невалідний UUID — `400`, відсутня чи видалена задача — `404`.
 
+## Пропуск створеного виконання Routine: SKIPPED
+
+Чинний `PATCH /api/tasks/:id` приймає `{ "status": "SKIPPED", "skipNote": "Причина" }`
+лише для Task з routineOccurrence. Звичайна Task → `400`, навіть без причини.
+У звичайному POST Task та POST/PATCH Subtask статус SKIPPED заборонений.
+Пауза чи видалення шаблону Routine не прибирають зв'язок уже створеної Task.
+
+skipNote — необов'язковий рядок із trim та довжиною 1–2000 символів після trim,
+або null. На **новому** переході в SKIPPED пропущене поле/null означає відсутність
+причини; cancellationNote очищається. Непорожній skipNote приймається лише для
+результуючого статусу SKIPPED. Причину поточного пропуску можна змінити окремим
+PATCH `{ "skipNote": "Нова причина" }` або очистити `{ "skipNote": null }`.
+Порожній/пробільний рядок, понад 2000 символів та інші типи → `400`.
+
+SKIPPED — окремий термінальний результат. Повні Task DTO списку (також архівного),
+деталей, POST і PATCH містять nullable skipNote та обчислюваний `skippedAt: ISO UTC | null`.
+skippedAt береться лише з достовірного **поточного реального** переходу в SKIPPED
+у TaskAction. EDITED, updatedAt, archive і повторний same-status PATCH не задають
+й не пересувають цей момент. Повторний незмінений PATCH не додає подій.
+Зміна лише skipNote журналюється як EDITED; переходи в/зі SKIPPED — STATUS_CHANGED
+зі snapshot статусу, cancellationNote та skipNote. Причина й статус зберігаються
+атомарно з журналом; помилка події відкочує зміни.
+
+Для SKIPPED: isCompleted=false, completedAt=null, isToday=false, isBacklog=false,
+timeToCompletionSeconds=null. Task залишається у звичайному неархівованому списку:
+пропуск не архівує й не видаляє її. ageSeconds зупиняється на поточному пропуску,
+час у чотирьох робочих статусах під час пропуску не накопичується. Нового ключа
+SKIPPED у statusDurationsSeconds немає. Спільний replay `tasks.history.ts` використовується
+summary та перевіркою результату для DTO/AFTER_COMPLETION. Неповна, суперечлива чи
+неоднозначна історія дає skippedAt=null і діагностику summary; generate без достовірної
+основи → `409`. updatedAt не використовується як заміна.
+
+PATCH `{ "status": "TODO" }` відкриває Task знову, очищає skipNote/skippedAt і
+відновлює звичайні правила summary. Перехід DONE → SKIPPED дозволений як явна
+зміна результату; SKIPPED → DONE знову використовує реальний completedAt.
+Ручний пропуск не змінює дітей. Подальші мутації підзадач застосовують звичайні
+правила синхронізації: вони можуть відкрити батька або перевести його в DONE;
+при виході зі SKIPPED причина очищається. Нового блокування батька немає.
+Архівовані Task приймають чинний Task PATCH; видалені повертають `404`.
+
+AFTER_COMPLETION продовжується після DONE від completedAt або після SKIPPED від
+skippedAt. Наступна дата — локальна дата цього instant у timezone **Routine** плюс
+intervalDays календарних днів. У наступнику `basisType` дорівнює COMPLETED або SKIPPED,
+`basisAt` — відповідний instant. `basisCompletedAt` збережено для сумісності:
+він дорівнює basisAt лише для COMPLETED, для SKIPPED — null. Для календарних та
+перших completion-виконань усі поля основи null. generation-preview адитивно повертає
+basisType/basisAt/basisCompletedAt, отримані з БД або перевіреного кандидата;
+клієнтські поля основи там і в generate відхиляються.
+
+У read-only `/preview` старі completedAt + completedOccurrenceNumber збережені.
+Альтернатива — **разом** skippedAt + skippedOccurrenceNumber, лише для AFTER_COMPLETION.
+Змішування обох контекстів, неповна пара чи невалідні значення → `400`. Це лише
+симуляція, а не запис пропуску. GET не створює Task, occurrence чи подій.
+
+Уже створений наступник незмінний при reopen або зміні DONE ↔ SKIPPED попередника;
+другий наступник не створюється. Календарна повторна генерація повертає ту саму
+SKIPPED Task як existing. SKIPPED витрачає COUNT як уже створене виконання.
+CANCELED/soft delete не продовжують ланцюжок; pause, DST, budgets, locks і Serializable
+retry залишаються чинними.
+
+Нова міграція `20261026120000_task_skipped` додає enum/колонки без очищення даних.
+Наявним наступникам із basisCompletedAt заповнюються `basisType=COMPLETED` і
+`basisAt=basisCompletedAt`; перші та календарні occurrences зберігають null.
+CHECK constraints захищають Routine-only SKIPPED, заборону SKIPPED у Subtask та
+узгодженість полів основи. Старі міграції не змінено.
+
+### Postman: пропуск і наступник AFTER_COMPLETION
+
+POST, Body → raw → JSON:
+
+```http
+POST {{baseUrl}}/api/routines
+Content-Type: application/json
+
+{
+  "title": "Замінити фільтр",
+  "estimatedDurationMinutes": 15,
+  "timezone": "Europe/Kyiv",
+  "startDate": "2026-01-01",
+  "schedule": {
+    "version": 1,
+    "recurrence": { "type": "AFTER_COMPLETION", "intervalDays": 2 },
+    "localTime": "09:00"
+  },
+  "endCondition": { "type": "COUNT", "count": 2 },
+  "subtasks": [{ "title": "Замінити картридж", "estimatedDurationMinutes": 15 }]
+}
+```
+
+Збережіть id як routineId. Створіть перше виконання й збережіть created[0].taskId як taskId:
+
+```http
+POST {{baseUrl}}/api/routines/{{routineId}}/generate
+Content-Type: application/json
+
+{ "from": "2026-01-01", "to": "2026-01-01" }
+```
+
+```http
+PATCH {{baseUrl}}/api/tasks/{{taskId}}
+Content-Type: application/json
+
+{ "status": "SKIPPED", "skipNote": "  Цього разу не потрібно  " }
+```
+
+Очікується status=SKIPPED, skipNote="Цього разу не потрібно", достовірний skippedAt,
+completedAt=null, isCompleted/isToday/isBacklog=false; дитина залишається TODO.
+Повторіть цей PATCH, потім `{ "skipNote": "Інша причина" }`: skippedAt незмінний,
+повтор без змін не створює події, зміна причини дає EDITED.
+
+Обчисліть nextDate: локальна дата skippedAt у Europe/Kyiv + 2 календарних дні.
+Наприклад, при пропуску локально 2026-10-26 nextDate=2026-10-28.
+GET без body, потім POST:
+
+```http
+GET {{baseUrl}}/api/tasks/{{taskId}}
+GET {{baseUrl}}/api/tasks?view=today
+GET {{baseUrl}}/api/tasks?view=backlog
+GET {{baseUrl}}/api/routines/{{routineId}}/generation-preview?from={{nextDate}}&to={{nextDate}}
+
+POST {{baseUrl}}/api/routines/{{routineId}}/generate
+Content-Type: application/json
+
+{ "from": "{{nextDate}}", "to": "{{nextDate}}" }
+```
+
+Preview не записує даних; кандидат має basisType=SKIPPED, basisAt=skippedAt,
+basisCompletedAt=null. POST створює одного наступника. PATCH попередника в TODO,
+потім DONE і повтор generate повертають того самого наступника як existing.
+Для simulation preview використайте пару skippedAt/skippedOccurrenceNumber=1;
+не передавайте цю пару в generation-preview або generate.
+
+Локальний opt-in PostgreSQL тест перевіряє міграції й backfill на даних старої схеми,
+CHECK/unique/FK constraints, відкат через реальну помилку тригера журналу та конкурентні
+skip/reopen/generate. Запуск — лише з окремим `ROUTINE_TEST_DATABASE_URL` на localhost,
+у новій ізольованій схемі. Для перевірки використовувався тимчасовий PostgreSQL 17
+із timezone UTC; DATABASE_URL/DIRECT_URL та Supabase не використовувалися.
+
 ## Підзадачі
 
 Кожен Task у відповідях `GET /api/tasks` (зокрема архівному списку),
@@ -203,7 +342,8 @@ POST вимагає `title` (1–160 символів після обрізан�
 `estimatedDurationMinutes` до `2147483647`. Необов'язкові `status` (типово `TODO`)
 та `cancellationNote`. PATCH приймає лише `title`, `status`,
 `estimatedDurationMinutes`, `cancellationNote`; порожній PATCH і невідомі поля
-відхиляються. Статуси ті самі, що й у задач. Передача `status: "CANCELED"` в POST
+відхиляються. Дозволені лише `TODO`, `IN_PROGRESS`, `PAUSED`, `POSTPONED`, `DONE`,
+`CANCELED`; `SKIPPED` заборонений у POST/PATCH підзадач. Передача `status: "CANCELED"` в POST
 або PATCH вимагає в тому самому запиті непорожню `cancellationNote`; причина
 зберігається після наступних переходів. `plannedAt`, `dueAt`, `priority` у підзадач немає.
 Відповідь містить `id`, `taskId`, `title`, `status`, `estimatedDurationMinutes`,
@@ -951,7 +1091,9 @@ CREATED містить `origin: { type: "ROUTINE", routineId }` і `routineOccur
     "instant": "2026-10-25T16:00:00.000Z",
     "occurrenceNumber": null,
     "previousOccurrenceId": null,
-    "basisCompletedAt": null
+    "basisCompletedAt": null,
+    "basisType": null,
+    "basisAt": null
   }
 }
 ```
@@ -1125,7 +1267,7 @@ POST {{baseUrl}}/api/routines/{{completionRoutineId}}/generate
 }
 ```
 
-Номер і completedAt клієнт не задає. Якщо остання Task ще не DONE та в діапазоні
+Номер і момент результату клієнт не задає. Якщо остання Task ще не DONE/SKIPPED та в діапазоні
 немає existing, GET поверне 409 за чинним правилом очікування завершення.
 
 ### AFTER_COMPLETION: генерація зі збереженого завершення
@@ -1134,7 +1276,7 @@ POST {{baseUrl}}/api/routines/{{completionRoutineId}}/generate
 planning, описаним вище, той самий
 формат created/existing. Клієнт **не передає** completedAt чи номер виконання:
 ці поля в generate дають `400`. Контекст GET preview залишається окремим read-only
-моделюванням і ніколи не стає фактом завершення. GET та перехід Task у DONE самі
+моделюванням і ніколи не стає фактом завершення. GET та перехід Task у DONE/SKIPPED самі
 нічого не генерують. Один POST створює максимум **одне** нове виконання.
 
 Без попередніх виконань кандидат — рівно startDate. Він створюється лише за
@@ -1142,17 +1284,18 @@ planning, описаним вище, той самий
 Дата запиту не пересуває перше виконання. Далі останнє виконання визначається
 за occurrenceNumber, а не createdAt, UUID чи останнім відредагованим Task.
 
-Для продовження остання Task має бути невидаленою й зараз DONE. Окремий helper
-перевіряє CREATED і весь ланцюжок STATUS_CHANGED до поточного стану. completedAt —
+Для продовження остання Task має бути невидаленою й зараз DONE або SKIPPED. Спільний
+із summary аналіз TaskAction перевіряє CREATED і весь ланцюжок STATUS_CHANGED до поточного стану. completedAt —
 timestamp останнього реального переходу з іншого статусу в DONE; same-status DONE
-не є новим завершенням. EDITED, AREA_CHANGED та archive не змінюють цей момент.
+не є новим завершенням. Для SKIPPED аналогічно використовується skippedAt реального
+поточного переходу. EDITED, AREA_CHANGED та archive не змінюють ці моменти.
 Автоматичний STATUS_CHANGED від підзадач перевіряється так само, як ручний.
 Відсутнє CREATED, зламаний ланцюжок, події поза життям Task, кілька реальних
 переходів з однаковим timestamp, невідповідність поточному статусу або вичерпаний
 бюджет історії → `409`, без записів. Журнал без sequence/version не доводить
 відсутності всіх невидимих пропусків, але видимі суперечності не ігноруються.
 
-completedAt переводиться в локальну дату timezone Routine, додаються intervalDays
+completedAt (DONE) або skippedAt (SKIPPED) переводиться в локальну дату timezone Routine, додаються intervalDays
 **календарних** днів. Спільний helper використовується preview і generate; немає
 другого алгоритму або додавання N × 24 годин. localTime застосовується до отриманої
 дати; без нього instant=null. Нерозв'язаний DST → `409`; час не зсувається й offset
@@ -1163,14 +1306,14 @@ completedAt переводиться в локальну дату timezone Routi
 
 1. Повертаються всі збережені виконання, які перетинають запитаний діапазон, у
    `existing`, у порядку occurrenceNumber. Сюди можуть входити ID видалених задач.
-2. Якщо остання Task не DONE, скасована або видалена, але є такі existing,
+2. Якщо остання Task не DONE/SKIPPED, скасована або видалена, але є такі existing,
    відповідь — `200`, createdCount=0. Це дозволяє повторити успішний POST, коли
    щойно створений наступник ще TODO. Запит без existing у новий діапазон → `409`
    із поясненням очікування або зупиненого ланцюжка.
-3. Якщо остання Task DONE із перевіреною історією й кандидат входить у діапазон,
+3. Якщо остання Task DONE/SKIPPED із перевіреною історією й кандидат входить у діапазон,
    створюється один наступник; старі existing можуть бути в тій самій відповіді.
-   Повтор після цього поверне нового наступника як existing, доки він не DONE.
-   Після фактичного DONE цього нового наступника черговий явний POST уже може
+   Повтор після цього поверне нового наступника як existing, доки він не DONE/SKIPPED.
+   Після фактичного DONE/SKIPPED цього нового наступника черговий явний POST уже може
    просунути ланцюжок ще на один крок, навіть із тим самим body. Майбутні завершення
    не прогнозуються. Допускається однакова календарна дата різних номерів, якщо
    попередні задачі фактично завершені раніше їхніх планових дат.
@@ -1179,14 +1322,14 @@ completedAt переводиться в локальну дату timezone Routi
    Поточна пауза Routine має пріоритет: вона завжди дає `409`, включно з retry.
 
 CANCELED та soft delete не створюють заміни й не дозволяють новий крок ланцюжка.
-Архів невидаленої DONE задачі не заважає продовженню. Повторне відкриття до
-генерації означає очікування нового реального DONE; повторний DONE задає нову
+Архів невидаленої DONE/SKIPPED задачі не заважає продовженню. Повторне відкриття до
+генерації означає очікування нового реального DONE/SKIPPED; новий результат задає нову
 основу для ще не створеного наступника. Якщо наступник уже існує, відкриття,
-повторний DONE або видалення **його попередника** не пересувають і не видаляють
+зміна DONE ↔ SKIPPED, повторний результат або видалення **його попередника** не пересувають і не видаляють
 цього наступника. Наступний крок спирається лише на останню Task ланцюжка.
 
 Для AFTER_COMPLETION COUNT — кількість **створених** виконань, включно зі
-скасованими/видаленими. Їхні номери не використовуються повторно. Це відрізняється
+пропущеними/скасованими/видаленими. Їхні номери не використовуються повторно. Це відрізняється
 від календарного COUNT запланованих вікон. NEVER та UNTIL_DATE включно збережені.
 Початкова зміна конфігурації до генерації перевіряється за журналом і датою її
 чинності; COUNT цього режиму відомий зі збереженого ланцюжка, а не історичної
@@ -1195,17 +1338,19 @@ CANCELED та soft delete не створюють заміни й не дозв�
 
 Минула пауза застосовується до дати початку кандидата за чинним `[pauseDate, resumeDate)`.
 Якщо кандидат у ній, generate → `409`: потрібне окреме рішення, дата не пересувається,
-кандидат не пропускається, уявний наступний не обчислюється. Ручного відновлення
-скасованого/видаленого ланцюжка та пропусків у цій версії немає.
+кандидат не пропускається, уявний наступний не обчислюється. SKIPPED застосовується
+лише до вже створеної Task; автоматичного пропуску незгенерованих вікон немає.
 
-RoutineOccurrence адитивно містить occurrenceNumber, previousOccurrenceId і
-basisCompletedAt. Перше виконання має номер 1 та два null; наступник — номер +1,
-ID попередника й незмінний timestamp завершення, на якому його створено.
+RoutineOccurrence адитивно містить occurrenceNumber, previousOccurrenceId,
+basisType, basisAt і сумісне basisCompletedAt. Перше виконання має номер 1 та решту
+цих полів null; наступник — номер +1, ID попередника й незмінну основу:
+`basisType=COMPLETED, basisAt=completedAt, basisCompletedAt=completedAt` або
+`basisType=SKIPPED, basisAt=skippedAt, basisCompletedAt=null`.
 Ключ: `v1:<routineId>:completion:<occurrenceNumber>`, без completedAt чи дати.
 У БД унікальні `(routineId, occurrenceNumber)` та previousOccurrenceId забезпечують
 унікальний номер і максимум одного наступника; попередні unique/FK збережені.
-У календарних occurrences, включно з наявними до міграції, **усі три поля null**;
-їм не приписуються штучні номери або попередники. Ці три поля також включені в
+У календарних occurrences, включно з наявними до міграції, **усі п'ять полів null**;
+їм не приписуються штучні номери або попередники. Ці поля також включені в
 routineOccurrence повного Task DTO; решта area/subtasks/summary/isCompleted збережена.
 
 Генерація бере locks Area → Routine → остання Task. PATCH Task спочатку блокує
@@ -1427,7 +1572,7 @@ view підтримується лише в GET списку.
 
 Task входить у беклог, **лише якщо одночасно**:
 
-- status — `TODO`, `PAUSED` або `POSTPONED`; `IN_PROGRESS`, `DONE`, `CANCELED` виключені;
+- status — `TODO`, `PAUSED` або `POSTPONED`; `IN_PROGRESS`, `DONE`, `CANCELED`, `SKIPPED` виключені;
 - archivedAt і deletedAt — null;
 - dueAt відсутній або `dueAt <= now`;
 - plannedAt відсутній або `plannedAt <= now`;
@@ -1520,7 +1665,8 @@ GET {{baseUrl}}/api/tasks?view=unknown
 ## «Сьогодні»: isToday і view=today
 
 Усі повні Task DTO у GET списку, GET деталей, POST та PATCH містять boolean
-`isToday`, `isBacklog` і `completedAt: ISO string | null`. Усі три поля обчислювані, без колонок БД.
+`isToday`, `isBacklog`, `completedAt: ISO string | null`, `skippedAt: ISO string | null`.
+Ці поля обчислювані, без колонок БД; skipNote — збережене nullable поле Task.
 area, subtasks, routineOccurrence,
 summary, isCompleted та всі чинні поля збережені. Підзадачі окремого isToday не мають.
 
@@ -1555,7 +1701,7 @@ GET деталей, POST та PATCH приймають три параметри
 
 ### Правила «Сьогодні»
 
-CANCELED, archivedAt != null або deletedAt != null завжди дають false.
+CANCELED, SKIPPED, archivedAt != null або deletedAt != null завжди дають false.
 М'яко видалені Task, як раніше, недоступні через API. PAUSED та POSTPONED самі
 по собі не виключають задачу; застосовуються її поточні збережені дати.
 
@@ -1760,7 +1906,7 @@ GET списку, GET деталей, POST і PATCH задачі поверта�
 Локальний часовий пояс на результат не впливає. `estimatedDurationMinutes`
 залишається плановою оцінкою в хвилинах і в summary не дублюється.
 
-- `ageSeconds` — від `createdAt` до `asOf`; для поточного `DONE` або `CANCELED`
+- `ageSeconds` — від `createdAt` до `asOf`; для поточного `DONE`, `CANCELED` або `SKIPPED`
   зупиняється на останньому вході в цей поточний кінцевий статус.
 - `inProgressSeconds` — сумарний час у статусі **«У роботі» (`IN_PROGRESS`)**.
   Це не незалежний таймер фактично витраченої праці.
@@ -1774,7 +1920,7 @@ GET списку, GET деталей, POST і PATCH задачі поверта�
 Ручні та автоматичні `STATUS_CHANGED`, включно з переходами через підзадачі,
 враховуються однаково. Звичайні редагування, архівування, події підзадач і записи
 з однаковими `before.status` та `after.status` не створюють переходу.
-Архівування не ставить облік на паузу. `DONE` і `CANCELED` не входять до сум
+Архівування не ставить облік на паузу. `DONE`, `CANCELED`, `SKIPPED` не входять до сум
 робочих статусів. Після повторного відкриття ці суми продовжують накопичуватися,
 а вік знову рахується до `asOf`, включно з календарним часом попередніх завершень.
 Повторне завершення встановлює нову межу віку та часу до завершення.

@@ -38,8 +38,10 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
     const asOf = now();
     return snapshot.tasks.map((task) => {
       const actions = snapshot.grouped.get(task.id) ?? [];
-      const completedAt = task.status === "DONE" ? verifiedTaskCompletion(task, actions, asOf).completedAt?.toISOString() ?? null : null;
-      return { ...task, completedAt,
+      const outcome = task.status === "DONE" || task.status === "SKIPPED" ? verifiedTaskCompletion(task, actions, asOf) : null;
+      const completedAt = outcome?.completedAt?.toISOString() ?? null;
+      const skippedAt = outcome?.skippedAt?.toISOString() ?? null;
+      return { ...task, completedAt, skippedAt,
         summary: calculateTaskSummary(task, actions, asOf),
         isToday: isTaskToday({ ...task, completedAt }, context, asOf),
         isBacklog: isTaskBacklog(task, asOf),
@@ -109,6 +111,17 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
         }
         const data: Partial<Task> = { ...fields };
         const status = fields.status ?? (isCompleted === undefined ? undefined : isCompleted ? "DONE" : "TODO");
+        const nextStatus = status ?? before.status;
+        if (nextStatus === "SKIPPED" && before.routineOccurrence === null) {
+          throw new ApiError(400, "Only a Routine Task can be skipped.");
+        }
+        if (fields.skipNote !== undefined && fields.skipNote !== null && nextStatus !== "SKIPPED") {
+          throw new ApiError(400, "skipNote requires SKIPPED status.");
+        }
+        if (nextStatus === "SKIPPED") {
+          data.cancellationNote = null;
+          if (before.status !== "SKIPPED") data.skipNote = fields.skipNote ?? null;
+        } else if (before.status === "SKIPPED") data.skipNote = null;
         if (status !== undefined) data.status = status;
         if (status === "POSTPONED" && before.status !== "POSTPONED" && fields.plannedAt === undefined) {
           data.plannedAt = null;
@@ -121,7 +134,7 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
             after: { areaId: updated.areaId, area: toAreaSnapshot(updated.area) },
           });
         }
-        const editedKeys = ["title", "description", "priority", "plannedAt", "dueAt", "estimatedDurationMinutes", "cancellationNote"] as const;
+        const editedKeys = ["title", "description", "priority", "plannedAt", "dueAt", "estimatedDurationMinutes", "cancellationNote", "skipNote"] as const;
         const previous: Record<string, unknown> = {};
         const next: Record<string, unknown> = {};
         for (const key of editedKeys) {
@@ -135,8 +148,8 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
         }
         if (before.status !== updated.status) {
           await tx.createAction(id, "STATUS_CHANGED", {
-            before: { status: before.status, cancellationNote: before.cancellationNote },
-            after: { status: updated.status, cancellationNote: updated.cancellationNote },
+            before: { status: before.status, cancellationNote: before.cancellationNote, skipNote: before.skipNote },
+            after: { status: updated.status, cancellationNote: updated.cancellationNote, skipNote: updated.skipNote },
           });
         }
         if (Boolean(before.archivedAt) !== Boolean(updated.archivedAt)) {

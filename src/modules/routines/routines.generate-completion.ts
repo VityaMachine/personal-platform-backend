@@ -7,7 +7,8 @@ import type { RoutinesTransactionRepository } from "./routines.repository";
 import type { ResolvedGenerationOccurrence } from "./routines.generation-resolver";
 
 export const COMPLETION_CHAIN_BUDGET = 10_000;
-export type CompletionChainFields = { occurrenceNumber: number; previousOccurrenceId: string | null; basisCompletedAt: Date | null };
+export type CompletionChainFields = { occurrenceNumber: number; previousOccurrenceId: string | null;
+  basisCompletedAt: Date | null; basisType: "COMPLETED" | "SKIPPED" | null; basisAt: Date | null };
 
 export async function resolveCompletionGeneration(
   routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerationRange,
@@ -21,14 +22,20 @@ export async function resolveCompletionGeneration(
   for (const [index, occurrence] of chain.entries()) {
     if (occurrence.occurrenceNumber !== index + 1 || occurrence.previousOccurrenceId !== (chain[index - 1]?.id ?? null)
       || occurrence.occurrenceKey !== `v1:${routine.id}:completion:${index + 1}`
-      || !occurrence.task || (index === 0 ? occurrence.basisCompletedAt !== null : occurrence.basisCompletedAt === null)) {
+      || !occurrence.task || (index === 0
+        ? occurrence.basisCompletedAt !== null || occurrence.basisType !== null || occurrence.basisAt !== null
+        : occurrence.basisAt === null || (occurrence.basisType === "COMPLETED"
+          ? occurrence.basisCompletedAt?.getTime() !== occurrence.basisAt.getTime()
+          : occurrence.basisType !== "SKIPPED" || occurrence.basisCompletedAt !== null))) {
       generationConflict("Stored completion chain is inconsistent. Generation requires repair.");
     }
   }
   const existing: ResolvedGenerationOccurrence[] = chain.filter((entry) => entry.startDate <= range.to && entry.endDate >= range.from)
     .map((entry) => ({ existingTaskId: entry.task!.id, occurrence: { occurrenceKey: entry.occurrenceKey,
       startDate: entry.startDate, endDate: entry.endDate, timezone: entry.timezone, localTime: entry.localTime,
-      instant: entry.instant?.toISOString() ?? null, diagnostics: [] } }));
+      instant: entry.instant?.toISOString() ?? null, diagnostics: [] },
+      chain: { occurrenceNumber: entry.occurrenceNumber!, previousOccurrenceId: entry.previousOccurrenceId,
+        basisCompletedAt: entry.basisCompletedAt, basisType: entry.basisType, basisAt: entry.basisAt } }));
   // COUNT counts persisted executions, including canceled/deleted tasks, not projected days.
   if (routine.endCondition.type === "COUNT" && chain.length >= routine.endCondition.count) return existing;
   if (routine.endCondition.type === "UNTIL_DATE" && range.from > routine.endCondition.date) return existing;
@@ -36,22 +43,26 @@ export async function resolveCompletionGeneration(
   const latest = chain.at(-1);
   let completionContext: { completedAt: string; completedOccurrenceNumber: number } | undefined;
   let basisCompletedAt: Date | null = null;
+  let basisAt: Date | null = null;
+  let basisType: CompletionChainFields["basisType"] = null;
   if (latest) {
     await tx.tasks.lock(latest.task!.id);
     // Include soft-deleted tasks so they stop the chain instead of becoming a missing/replaced task.
     const task = await tx.tasks.findFirst({ id: latest.task!.id });
     if (!task) generationConflict("The latest completion Task is missing. Generation requires repair.");
-    if (task.deletedAt || task.status !== "DONE") {
+    if (task.deletedAt || (task.status !== "DONE" && task.status !== "SKIPPED")) {
       // A network retry finds its saved result even if that result is TODO/canceled/deleted now.
       if (existing.length) return existing;
       if (task.deletedAt) generationConflict("The latest Task is deleted. The completion chain is stopped; Tasks are not replaced.");
       if (task.status === "CANCELED") generationConflict("The latest Task is canceled. The completion chain is stopped.");
-      generationConflict("The latest Task is not DONE. The completion chain is waiting for its completion.");
+      generationConflict("The latest Task is not DONE or SKIPPED. The completion chain is waiting for its result.");
     }
     const completion = verifiedTaskCompletion(task, await tx.tasks.findCompletionActions(task.id, COMPLETION_HISTORY_BUDGET + 1), asOf);
-    if (completion.completedAt === null) generationConflict(`Task completion history is uncertain: ${completion.issues.join(", ")}.`);
+    basisAt = task.status === "SKIPPED" ? completion.skippedAt : completion.completedAt;
+    if (basisAt === null) generationConflict(`Task outcome history is uncertain: ${completion.issues.join(", ")}.`);
+    basisType = task.status === "SKIPPED" ? "SKIPPED" : "COMPLETED";
     basisCompletedAt = completion.completedAt;
-    completionContext = { completedAt: basisCompletedAt.toISOString(), completedOccurrenceNumber: latest.occurrenceNumber! };
+    completionContext = { completedAt: basisAt.toISOString(), completedOccurrenceNumber: latest.occurrenceNumber! };
   }
   const rule = routine.schedule.recurrence;
   if (rule.type !== "AFTER_COMPLETION") throw new Error("Expected completion-based Routine.");
@@ -75,5 +86,5 @@ export async function resolveCompletionGeneration(
   if (candidate.diagnostics.length) generationConflict("Routine has unresolved DST local times. No Task was generated.");
   if (chain.length >= COMPLETION_CHAIN_BUDGET) generationConflict("Completion chain budget reached. Further generation requires a separate decision.");
   return [...existing, { occurrence: candidate, existingTaskId: null, chain: { occurrenceNumber: calendar.occurrenceNumber,
-    previousOccurrenceId: latest?.id ?? null, basisCompletedAt } }];
+    previousOccurrenceId: latest?.id ?? null, basisCompletedAt, basisType, basisAt } }];
 }
