@@ -15,9 +15,15 @@ export function createRoutineQueries(db: Prisma.TransactionClient) {
     tasks: createTaskQueries(db),
     lock(id: string) { return lockRoutine(db, id); },
     hasOccurrences(routineId: string) { return db.routineOccurrence.findFirst({ where: { routineId }, select: { id: true } }); },
+    findScheduleVersions(routineId: string) {
+      return db.routineScheduleVersion.findMany({ where: { routineId }, orderBy: { number: "asc" }, take: 101 });
+    },
+    createScheduleVersion(data: Prisma.RoutineScheduleVersionUncheckedCreateInput) {
+      return db.routineScheduleVersion.create({ data });
+    },
     findCompletionChain(routineId: string, take: number) {
       return db.routineOccurrence.findMany({ where: { routineId }, orderBy: { occurrenceNumber: "asc" }, take,
-        select: { id: true, routineId: true, occurrenceKey: true, occurrenceNumber: true, previousOccurrenceId: true,
+        select: { id: true, routineId: true, scheduleVersionId: true, occurrenceKey: true, occurrenceNumber: true, previousOccurrenceId: true,
           basisCompletedAt: true, basisType: true, basisAt: true, startDate: true, endDate: true, timezone: true, localTime: true, instant: true,
           task: { select: { id: true } } } });
     },
@@ -66,9 +72,11 @@ export function isRoutineOccurrenceUniqueConflict(error: Prisma.PrismaClientKnow
   const fields = constraint?.fields ?? (Array.isArray(target) ? target : []);
   return error.code === "P2002" && (
     fields.includes("routineOccurrenceId") || fields.includes("previousOccurrenceId")
-    || (fields.includes("routineId") && (fields.includes("occurrenceKey") || fields.includes("occurrenceNumber")))
+    || (fields.includes("routineId") && ["occurrenceKey", "occurrenceNumber", "number", "effectiveDate", "effectiveAt"].some((key) => fields.includes(key)))
     || [target, index].some((name) => ["RoutineOccurrence_routineId_occurrenceKey_key", "Task_routineOccurrenceId_key",
-      "RoutineOccurrence_routineId_occurrenceNumber_key", "RoutineOccurrence_previousOccurrenceId_key"].includes(String(name))));
+      "RoutineOccurrence_routineId_occurrenceNumber_key", "RoutineOccurrence_previousOccurrenceId_key",
+      "RoutineScheduleVersion_routineId_number_key", "RoutineScheduleVersion_routineId_effectiveDate_key",
+      "RoutineScheduleVersion_routineId_effectiveAt_key"].includes(String(name))));
 }
 export function createRoutinesRepository(client: () => PrismaClient = getPrisma) {
   return {

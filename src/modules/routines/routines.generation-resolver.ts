@@ -4,19 +4,29 @@ import { MAX_NEW_ROUTINE_TASKS, generationConflict, planRoutineGeneration, type 
 import { resolveCompletionGeneration, type CompletionChainFields } from "./routines.generate-completion";
 import type { PreviewOccurrence } from "./routines.preview";
 import type { RoutinesTransactionRepository } from "./routines.repository";
+import { parseScheduleVersions, validateScheduleVersionHistory, type ScheduleVersion } from "./routines.versions";
+import { resolveVersionedCalendar } from "./routines.versioned-calendar";
+import type { WindowConflict } from "./routines.version-conflicts";
 
 export type ResolvedGenerationOccurrence = {
   occurrence: PreviewOccurrence;
   existingTaskId: string | null;
   chain?: CompletionChainFields;
+  scheduleVersion?: ScheduleVersion;
 };
 
 /** Candidate resolution only: queries/locks in the caller's transaction, never writes. */
 export async function resolveRoutineGeneration(
   routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerationRange,
   tx: RoutinesTransactionRepository, asOf: Date,
-): Promise<ResolvedGenerationOccurrence[]> {
-  if (routine.schedule.recurrence.type === "AFTER_COMPLETION") return resolveCompletionGeneration(routine, actions, range, tx, asOf);
+): Promise<{ candidates: ResolvedGenerationOccurrence[]; conflicts: WindowConflict[] }> {
+  const versions = parseScheduleVersions(await tx.findScheduleVersions(routine.id));
+  validateScheduleVersionHistory(routine, versions, actions);
+  if (routine.schedule.recurrence.type === "AFTER_COMPLETION") {
+    return { candidates: await resolveCompletionGeneration(routine, actions, range, tx, asOf, versions), conflicts: [] };
+  }
+  if (versions.length > 1) return resolveVersionedCalendar(routine, actions, versions,
+    await tx.findCompletionChain(routine.id, 10_001), range, true);
   const candidates = planRoutineGeneration(routine, actions, range);
   const stored = candidates.length ? await tx.findOccurrences(routine.id, candidates.map((entry) => entry.occurrenceKey)) : [];
   const byKey = new Map(stored.map((entry) => [entry.occurrenceKey, entry]));
@@ -24,7 +34,8 @@ export async function resolveRoutineGeneration(
     generationConflict("Generation would create more than 100 new Tasks. Request a smaller range.");
   }
   if (stored.some((entry) => !entry.task)) generationConflict("Stored Routine occurrence has no Task. Generation requires repair.");
-  return candidates.map((occurrence) => ({ occurrence, existingTaskId: byKey.get(occurrence.occurrenceKey)?.task?.id ?? null }));
+  return { candidates: candidates.map((occurrence) => ({ occurrence, scheduleVersion: versions[0],
+    existingTaskId: byKey.get(occurrence.occurrenceKey)?.task?.id ?? null })), conflicts: [] };
 }
 
 export function validateGenerationPlanning(

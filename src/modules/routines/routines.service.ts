@@ -9,6 +9,10 @@ import { calendarConfiguration, generationConflict, type GenerateRoutineInput, t
 import { createTaskWithSubtasks } from "../tasks/tasks.creation";
 import type { Prisma } from "../../generated/prisma/client";
 import { resolveRoutineGeneration, validateGenerationPlanning } from "./routines.generation-resolver";
+import { appendScheduleVersion } from "./routines.versions.service";
+import { calendarSnapshot, parseScheduleVersions, resolveCompletionVersion, validateScheduleVersionHistory, versionMidnight, versionedKey,
+  type CreateScheduleVersionInput } from "./routines.versions";
+import { resolveVersionedCalendar } from "./routines.versioned-calendar";
 
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 export function createRoutinesService(repository: RoutinesRepository, now: () => Date = () => new Date()) {
@@ -38,7 +42,7 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
     await tx.lock(id);
     const routine = await find(id, tx, true);
     const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
-    return { routine, candidates: await resolveRoutineGeneration(routine, actions, range, tx, now()) };
+    return { routine, ...await resolveRoutineGeneration(routine, actions, range, tx, now()) };
   }
   function state(routine: Awaited<ReturnType<typeof find>>): RoutineState {
     return routineStateSchema.parse({
@@ -51,32 +55,38 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
   return {
     list() { return transaction(async (tx) => (await tx.findMany({ deletedAt: null })).map(toRoutineResponse)); },
     get(id: string) { return transaction((tx) => find(id, tx)); },
+    scheduleVersions(id: string) {
+      return transaction(async (tx) => { await find(id, tx); return parseScheduleVersions(await tx.findScheduleVersions(id)); });
+    },
+    createScheduleVersion(id: string, input: CreateScheduleVersionInput) {
+      return transaction((tx) => appendScheduleVersion(id, input, tx, now));
+    },
     generationPreview(id: string, range: GenerationRange) {
       return transaction(async (tx) => {
-        const { routine, candidates } = await resolveGeneration(id, range, tx);
+        const { routine, candidates, conflicts } = await resolveGeneration(id, range, tx);
         return { routineId: id, timezone: routine.timezone, ...range,
           occurrences: candidates.map((entry) => ({ ...entry.occurrence,
             basisType: entry.chain?.basisType ?? null,
             basisAt: entry.chain?.basisAt?.toISOString() ?? null,
             basisCompletedAt: entry.chain?.basisCompletedAt?.toISOString() ?? null,
             instant: entry.occurrence.instant === null ? null : new Date(entry.occurrence.instant).toISOString(),
-            existing: entry.existingTaskId !== null })) };
+            existing: entry.existingTaskId !== null })), ...(conflicts.length ? { conflicts } : {}) };
       });
     },
     generate(id: string, input: GenerateRoutineInput) {
       const range = { from: input.from, to: input.to };
       return transaction(async (tx) => {
-        const { routine, candidates } = await resolveGeneration(id, range, tx);
+        const { routine, candidates, conflicts } = await resolveGeneration(id, range, tx);
         const planning = validateGenerationPlanning(routine, candidates, input.planning);
         const created: { occurrenceKey: string; taskId: string }[] = [];
         const existing: typeof created = [];
         // Resolve and validate the entire planning map before any writes.
-        for (const { occurrence: candidate, chain, existingTaskId } of candidates) {
+        for (const { occurrence: candidate, chain, existingTaskId, scheduleVersion } of candidates) {
           if (existingTaskId !== null) { existing.push({ occurrenceKey: candidate.occurrenceKey, taskId: existingTaskId }); continue; }
           const { diagnostics: _diagnostics, ...calendar } = candidate;
-          const occurrence = await tx.createOccurrence({ ...calendar, ...chain, routineId: id,
+          const occurrence = await tx.createOccurrence({ ...calendar, ...chain, routineId: id, scheduleVersionId: scheduleVersion!.id,
             instant: calendar.instant === null ? null : new Date(calendar.instant),
-            snapshot: JSON.parse(JSON.stringify(routine)) as Prisma.InputJsonValue });
+            snapshot: JSON.parse(JSON.stringify({ ...routine, ...calendarSnapshot(scheduleVersion!) })) as Prisma.InputJsonValue });
           const { snapshot: _snapshot, createdAt: _createdAt, ...origin } = occurrence;
           const task = await createTaskWithSubtasks(tx.tasks, {
             title: routine.title, description: routine.description, priority: routine.priority,
@@ -84,7 +94,8 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
           }, routine.subtasks, { area: routine.area, routineOccurrence: { ...origin, snapshot: occurrence.snapshot } });
           created.push({ occurrenceKey: occurrence.occurrenceKey, taskId: task.id });
         }
-        return { routineId: id, ...range, createdCount: created.length, existingCount: existing.length, created, existing };
+        return { routineId: id, ...range, createdCount: created.length, existingCount: existing.length, created, existing,
+          ...(conflicts.length ? { conflicts } : {}) };
       });
     },
     preview(id: string, query: RoutinePreviewQuery) {
@@ -94,6 +105,30 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
           throw new ApiError(400, "Completion context requires AFTER_COMPLETION.");
         }
         const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
+        const versions = parseScheduleVersions(await tx.findScheduleVersions(id));
+        if (versions.length > 1) {
+          validateScheduleVersionHistory(routine, versions, actions);
+          const completionContext = query.skippedAt !== undefined ? { completedAt: query.skippedAt,
+            completedOccurrenceNumber: query.skippedOccurrenceNumber! } : query.completedAt === undefined ? undefined
+            : { completedAt: query.completedAt, completedOccurrenceNumber: query.completedOccurrenceNumber! };
+          if (routine.schedule.recurrence.type === "AFTER_COMPLETION") {
+            let selected: ReturnType<typeof resolveCompletionVersion>;
+            try { selected = resolveCompletionVersion(routine, versions,
+              (version) => normalizePreviewHistory({ ...routine, ...version }, actions, true), completionContext); }
+            catch (error) { if (error instanceof RangeError) throw new ApiError(400, error.message); throw error; }
+            if (!selected.candidate) throw new ApiError(409, "VERSION_BOUNDARY_NO_CANDIDATE: no completion candidate belongs to its schedule version.");
+            const configured = { ...routine, ...selected.candidate.version, id };
+            const preview = calculateRoutinePreview(configured, query.from, query.to, query.limit,
+              { ...normalizePreviewHistory(configured, actions, true), completionContext });
+            return { ...preview, occurrences: preview.occurrences.map((occurrence) => ({ ...occurrence,
+              occurrenceKey: versionedKey(occurrence.occurrenceKey, selected.candidate!.version) })) };
+          }
+          const resolved = resolveVersionedCalendar(routine, actions, versions, await tx.findCompletionChain(id, 10_001), query, false);
+          return { routineId: id, timezone: routine.timezone, from: query.from, to: query.to,
+            occurrences: resolved.candidates.slice(0, query.limit).map((entry) => entry.occurrence),
+            truncated: resolved.truncated || resolved.candidates.length > query.limit, limitations: resolved.limitations,
+            ...(resolved.conflicts.length ? { conflicts: resolved.conflicts } : {}) };
+        }
         const history = normalizePreviewHistory(routine, actions);
         if (history.limitations.includes("HISTORY_BUDGET_EXCEEDED")) {
           return { routineId: id, timezone: routine.timezone, from: query.from, to: query.to, occurrences: [], truncated: false,
@@ -117,6 +152,9 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
         const { subtasks, ...fields } = routineStateSchema.parse(input);
         await checkArea(fields.areaId, tx);
         const routine = await tx.create(fields);
+        await tx.createScheduleVersion({ routineId: routine.id, number: 1, effectiveDate: fields.startDate,
+          effectiveTimezone: fields.timezone, effectiveAt: new Date(versionMidnight(fields.startDate, fields.timezone).epochMilliseconds),
+          ...calendarSnapshot(fields) });
         if (subtasks.length) await tx.replaceSubtasks(routine.id, subtasks);
         const after = await find(routine.id, tx);
         await tx.createAction(routine.id, "CREATED", { before: null, after });
@@ -132,8 +170,8 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
         const next = routineStateSchema.parse({ ...previous, ...patch });
         if (patch.areaId) await checkArea(patch.areaId, tx);
         await tx.lock(id);
-        if (calendarConfiguration(previous) !== calendarConfiguration(next) && await tx.hasOccurrences(id)) {
-          generationConflict("Calendar configuration cannot change after generation. Create a new Routine; existing occurrences and Tasks are immutable snapshots.");
+        if (calendarConfiguration(previous) !== calendarConfiguration(next)) {
+          generationConflict("Calendar configuration is immutable. Use POST schedule-versions with an explicit future effectiveDate.");
         }
         const changed = !same(previous, next);
         const pauseChanged = paused !== undefined && paused !== Boolean(before.pausedAt);

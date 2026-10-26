@@ -8,7 +8,7 @@ export const PREVIEW_HISTORY_BUDGET = 10_000;
 /** Interpret event instants in the CURRENT timezone: this is a projection, not historical schedule replay.
  * Pause date is inclusive; resume date exclusive. Same-day pause/resume excludes no dates.
  */
-export function normalizePreviewHistory(routine: PreviewRoutine & { pausedAt: Date | null }, actions: readonly RoutineAction[]) {
+export function normalizePreviewHistory(routine: PreviewRoutine & { pausedAt: Date | null }, actions: readonly RoutineAction[], versioned = false) {
   const limitations = new Set<string>();
   const pauses: PauseInterval[] = [];
   let reliable = true;
@@ -34,7 +34,7 @@ export function normalizePreviewHistory(routine: PreviewRoutine & { pausedAt: Da
     for (const snapshot of [before, after]) {
       if (snapshot?.pausedAt && !knownPauseStarts.has(snapshot.pausedAt)) uncertain();
     }
-    if (config(after) !== config(routine) || (before && config(before) !== config(routine))) {
+    if (!versioned && (config(after) !== config(routine) || (before && config(before) !== config(routine)))) {
       reliable = false;
       limitations.add("CONFIGURATION_CHANGED");
     }

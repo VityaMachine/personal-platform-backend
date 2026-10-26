@@ -5,6 +5,8 @@ import { calculateRoutinePreview } from "./routines.preview";
 import { generationConflict, readGenerationHistory, type GenerationRange, type GenerationRoutine } from "./routines.generate";
 import type { RoutinesTransactionRepository } from "./routines.repository";
 import type { ResolvedGenerationOccurrence } from "./routines.generation-resolver";
+import { resolveCompletionVersion, type ScheduleVersion, versionConflict, versionedKey } from "./routines.versions";
+import { normalizePreviewHistory } from "./routines.preview-history";
 
 export const COMPLETION_CHAIN_BUDGET = 10_000;
 export type CompletionChainFields = { occurrenceNumber: number; previousOccurrenceId: string | null;
@@ -13,15 +15,17 @@ export type CompletionChainFields = { occurrenceNumber: number; previousOccurren
 export async function resolveCompletionGeneration(
   routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerationRange,
   tx: RoutinesTransactionRepository, asOf: Date,
+  versions: readonly ScheduleVersion[],
 ): Promise<ResolvedGenerationOccurrence[]> {
-  const { history, effectiveDate } = readGenerationHistory(routine, actions);
+  const { history, effectiveDate } = readGenerationHistory(routine, actions, versions.length > 1);
   const blocking = history.limitations.filter((code) => code !== "CONFIGURATION_CHANGED");
   if (blocking.length) generationConflict(`Routine history is uncertain: ${blocking.join(", ")}.`);
   const chain = await tx.findCompletionChain(routine.id, COMPLETION_CHAIN_BUDGET + 1);
   if (chain.length > COMPLETION_CHAIN_BUDGET) generationConflict("Completion chain budget exceeded. A partial chain cannot be generated.");
   for (const [index, occurrence] of chain.entries()) {
     if (occurrence.occurrenceNumber !== index + 1 || occurrence.previousOccurrenceId !== (chain[index - 1]?.id ?? null)
-      || occurrence.occurrenceKey !== `v1:${routine.id}:completion:${index + 1}`
+      || occurrence.occurrenceKey !== versionedKey(`v1:${routine.id}:completion:${index + 1}`,
+        versions.find((version) => version.id === occurrence.scheduleVersionId) ?? versions[0])
       || !occurrence.task || (index === 0
         ? occurrence.basisCompletedAt !== null || occurrence.basisType !== null || occurrence.basisAt !== null
         : occurrence.basisAt === null || (occurrence.basisType === "COMPLETED"
@@ -35,10 +39,11 @@ export async function resolveCompletionGeneration(
       startDate: entry.startDate, endDate: entry.endDate, timezone: entry.timezone, localTime: entry.localTime,
       instant: entry.instant?.toISOString() ?? null, diagnostics: [] },
       chain: { occurrenceNumber: entry.occurrenceNumber!, previousOccurrenceId: entry.previousOccurrenceId,
-        basisCompletedAt: entry.basisCompletedAt, basisType: entry.basisType, basisAt: entry.basisAt } }));
+        basisCompletedAt: entry.basisCompletedAt, basisType: entry.basisType, basisAt: entry.basisAt },
+      scheduleVersion: versions.find((version) => version.id === entry.scheduleVersionId) }));
   // COUNT counts persisted executions, including canceled/deleted tasks, not projected days.
-  if (routine.endCondition.type === "COUNT" && chain.length >= routine.endCondition.count) return existing;
-  if (routine.endCondition.type === "UNTIL_DATE" && range.from > routine.endCondition.date) return existing;
+  if (versions.length === 1 && routine.endCondition.type === "COUNT" && chain.length >= routine.endCondition.count) return existing;
+  if (versions.length === 1 && routine.endCondition.type === "UNTIL_DATE" && range.from > routine.endCondition.date) return existing;
   if (range.to < routine.startDate) return existing;
   const latest = chain.at(-1);
   let completionContext: { completedAt: string; completedOccurrenceNumber: number } | undefined;
@@ -64,27 +69,41 @@ export async function resolveCompletionGeneration(
     basisCompletedAt = completion.completedAt;
     completionContext = { completedAt: basisAt.toISOString(), completedOccurrenceNumber: latest.occurrenceNumber! };
   }
-  const rule = routine.schedule.recurrence;
+  let versionResolution: ReturnType<typeof resolveCompletionVersion>;
+  try { versionResolution = resolveCompletionVersion(routine, versions,
+    (version) => normalizePreviewHistory({ ...routine, ...version }, actions, versions.length > 1), completionContext); }
+  catch (error) {
+    if (error instanceof RangeError) return generationConflict("Completion precedes Routine startDate or is outside the supported calendar.");
+    throw error;
+  }
+  if (!versionResolution.candidate) {
+    versionConflict("VERSION_BOUNDARY_NO_CANDIDATE: no completion candidate belongs to its effective schedule version.");
+  }
+  const selectedVersion = versionResolution.candidate.version;
+  if (selectedVersion.endCondition.type === "COUNT" && chain.length >= selectedVersion.endCondition.count) return existing;
+  const selectedRoutine = { ...routine, ...selectedVersion, id: routine.id };
+  const selectedHistory = normalizePreviewHistory(selectedRoutine, actions, versions.length > 1);
+  const rule = selectedVersion.schedule.recurrence;
   if (rule.type !== "AFTER_COMPLETION") throw new Error("Expected completion-based Routine.");
   let calendar: ReturnType<typeof completionCalendarDate>;
-  try { calendar = completionCalendarDate(routine, rule.intervalDays, completionContext); }
+  try { calendar = completionCalendarDate(selectedRoutine, rule.intervalDays, completionContext); }
   catch { return generationConflict("Completion precedes Routine startDate or is outside the supported calendar."); }
   if (calendar.date === null) generationConflict(`Completion calendar is incomplete: ${calendar.limitation}.`);
   const date = calendar.date;
-  if (routine.endCondition.type === "UNTIL_DATE" && date > routine.endCondition.date) return existing;
+  if (selectedVersion.endCondition.type === "UNTIL_DATE" && date > selectedVersion.endCondition.date) return existing;
   if (date < range.from || date > range.to) return existing;
   if (effectiveDate && date <= effectiveDate) generationConflict("Occurrence starts on or before the latest configuration change. Generation requires a later start.");
-  if (history.pauses.some((pause) => pause.startDate <= date && (pause.endDate === null || date < pause.endDate))) {
+  if (selectedHistory.pauses.some((pause) => pause.startDate <= date && (pause.endDate === null || date < pause.endDate))) {
     generationConflict("The completion occurrence falls in a past pause. A separate decision is required; its date is not shifted or skipped.");
   }
-  const preview = calculateRoutinePreview(routine, range.from, range.to, 1, { ...history, countReliable: true, completionContext });
+  const preview = calculateRoutinePreview(selectedRoutine, range.from, range.to, 1, { ...selectedHistory, countReliable: true, completionContext });
   const limitations = preview.limitations.filter((code) => !["CURRENT_CONFIGURATION_PROJECTION", "CONFIGURATION_CHANGED", "FUTURE_COMPLETIONS_REQUIRED"].includes(code));
   if (limitations.length || preview.truncated || preview.occurrences.length !== 1) {
     generationConflict(`Completion calendar is incomplete: ${limitations.join(", ") || "MISSING_CANDIDATE"}.`);
   }
-  const candidate = preview.occurrences[0];
+  const candidate = { ...preview.occurrences[0], occurrenceKey: versionedKey(preview.occurrences[0].occurrenceKey, selectedVersion) };
   if (candidate.diagnostics.length) generationConflict("Routine has unresolved DST local times. No Task was generated.");
   if (chain.length >= COMPLETION_CHAIN_BUDGET) generationConflict("Completion chain budget reached. Further generation requires a separate decision.");
-  return [...existing, { occurrence: candidate, existingTaskId: null, chain: { occurrenceNumber: calendar.occurrenceNumber,
+  return [...existing, { occurrence: candidate, existingTaskId: null, scheduleVersion: selectedVersion, chain: { occurrenceNumber: calendar.occurrenceNumber,
     previousOccurrenceId: latest?.id ?? null, basisCompletedAt, basisType, basisAt } }];
 }

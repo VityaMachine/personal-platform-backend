@@ -197,16 +197,16 @@ test("DST and incomplete/budgeted histories reject atomically; all-day instant=n
     if (!r.id) throw new Error(`Invalid fixture for ${mode}`);
     if (mode === "count") {
       f.setTime(new Date("2026-01-02T10:00:00Z"));
-      await f.routineRequest("PATCH", `/${r.id}`, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 2 } } });
+      f.legacyCalendarEdit(r.id, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 2 } } });
     }
     if (mode === "missing") f.state().routineActions = [];
     if (mode === "corrupt") f.state().routineActions[0].metadata = {};
     if (mode === "historyBudget") f.state().routineActions = Array.from({ length: 10001 }, () => f.state().routineActions[0]);
     if (mode === "gap") {
       f.setTime(new Date("2026-01-02T10:00:00Z"));
-      await f.routineRequest("PATCH", `/${r.id}`, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 3 } } });
+      f.legacyCalendarEdit(r.id, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 3 } } });
       f.setTime(new Date("2026-01-03T10:00:00Z"));
-      await f.routineRequest("PATCH", `/${r.id}`, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 4 } } });
+      f.legacyCalendarEdit(r.id, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 4 } } });
       f.state().routineActions.splice(1, 1);
     }
     const before = structuredClone(f.state());
@@ -246,12 +246,12 @@ test("100 NEW task limit rejects before writes, but permits a large range with e
   assert.equal(repeat.createdCount, 0); assert.equal(repeat.existingCount, 200);
 });
 
-test("calendar edits before generation are effective only for later starts; edits after generation are explicit conflicts", async (t) => {
+test("legacy calendar changes retain their effective-date guard; new calendar PATCH requires an explicit version", async (t) => {
   const f = await fixture(t);
   f.setTime(new Date("2026-10-24T10:00:00Z"));
   const r = (await f.routineRequest("POST", "", { ...massage, endCondition: { type: "NEVER" } })).body;
   f.setTime(new Date("2026-10-28T10:00:00Z"));
-  await f.routineRequest("PATCH", `/${r.id}`, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 3 } } });
+  f.legacyCalendarEdit(r.id, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 3 } } });
   const before = structuredClone(f.state());
   assert.equal((await f.routineRequest("POST", `/${r.id}/generate`, range)).status, 409);
   assert.deepEqual(f.state(), before);

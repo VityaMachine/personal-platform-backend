@@ -3,12 +3,19 @@ import type { CreateRoutineInput, UpdateRoutineInput } from "./routines.schemas"
 import type { RoutinesService } from "./routines.service";
 import type { RoutinePreviewQuery } from "./routines.preview.schemas";
 import type { GenerateRoutineInput, GenerationRange } from "./routines.generate";
+import type { CreateScheduleVersionInput } from "./routines.versions";
 
 type RoutineResponse<Locals extends Record<string, unknown>> = Response<unknown, Locals>;
 export function createRoutinesController(service: RoutinesService) {
   return {
     async list(_request: Request, response: Response) { response.json(await service.list()); },
     async get(_request: Request, response: RoutineResponse<{ id: string }>) { response.json(await service.get(response.locals.id)); },
+    async scheduleVersions(_request: Request, response: RoutineResponse<{ id: string }>) {
+      response.json(await service.scheduleVersions(response.locals.id));
+    },
+    async createScheduleVersion(_request: Request, response: RoutineResponse<{ id: string; body: CreateScheduleVersionInput }>) {
+      response.status(201).json(await service.createScheduleVersion(response.locals.id, response.locals.body));
+    },
     async preview(_request: Request, response: RoutineResponse<{ id: string; query: RoutinePreviewQuery }>) {
       response.json(await service.preview(response.locals.id, response.locals.query));
     },

@@ -38,6 +38,7 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   const ordinaryId = randomUUID();
   const legacyRoutineId = randomUUID(), legacyOccurrenceId = randomUUID();
   const legacyFirstId = randomUUID(), legacySuccessorId = randomUUID();
+  const legacyPausedId = randomUUID(), legacyDeletedId = randomUUID();
   const legacyBasis = "2026-01-02T12:00:00.000Z";
   for (const migration of migrations) {
     if (migration === "20261025120000_routine_occurrences") {
@@ -57,6 +58,12 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
           ($2, $3, 'legacy-completion-2', '2026-01-04', '2026-01-04', 'UTC', '{}', 2, $1, $4)`,
       [legacyFirstId, legacySuccessorId, legacyRoutineId, legacyBasis]);
     }
+    if (migration === "20261026130000_routine_schedule_versions") {
+      await sql.query(`INSERT INTO "Routine" ("id", "title", "estimatedDurationMinutes", "timezone", "startDate", "schedule", "endCondition", "pausedAt", "deletedAt", "updatedAt")
+        VALUES ($1, 'Legacy paused', 10, 'Europe/Kyiv', '2026-10-25', '{"version":1,"recurrence":{"type":"DAILY","intervalDays":2}}', '{"type":"NEVER"}', now(), NULL, now()),
+          ($2, 'Legacy deleted', 10, 'UTC', '2026-01-01', '{"version":1,"recurrence":{"type":"AFTER_COMPLETION","intervalDays":3}}', '{"type":"COUNT","count":5}', NULL, now(), now())`,
+      [legacyPausedId, legacyDeletedId]);
+    }
     await sql.query(await readFile(path.join(directory, migration, "migration.sql"), "utf8"));
   }
   assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: ordinaryId } })).routineOccurrenceId, null);
@@ -68,6 +75,22 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   const oldSuccessor = await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: legacySuccessorId } });
   assert.equal(oldSuccessor.basisType, "COMPLETED"); assert.equal(oldSuccessor.basisAt!.toISOString(), legacyBasis);
   assert.equal(oldSuccessor.basisCompletedAt!.toISOString(), legacyBasis);
+  const backfilledVersion = await prisma.routineScheduleVersion.findFirstOrThrow({ where: { routineId: legacyRoutineId } });
+  assert.equal(backfilledVersion.number, 1); assert.equal(backfilledVersion.effectiveDate, "2026-01-01");
+  assert.equal(backfilledVersion.timezone, "UTC"); assert.equal(backfilledVersion.effectiveTimezone, "UTC");
+  assert.equal(legacy.scheduleVersionId, backfilledVersion.id);
+  assert.equal(oldFirst.scheduleVersionId, backfilledVersion.id); assert.equal(oldSuccessor.scheduleVersionId, backfilledVersion.id);
+  assert.equal(oldSuccessor.startDate, "2026-01-04"); assert.equal(oldSuccessor.previousOccurrenceId, legacyFirstId);
+  const pausedVersion = await prisma.routineScheduleVersion.findFirstOrThrow({ where: { routineId: legacyPausedId } });
+  assert.equal(pausedVersion.effectiveAt.toISOString(), "2026-10-24T21:00:00.000Z");
+  assert.equal(pausedVersion.effectiveTimezone, "Europe/Kyiv");
+  const deletedVersion = await prisma.routineScheduleVersion.findFirstOrThrow({ where: { routineId: legacyDeletedId } });
+  assert.deepEqual(deletedVersion.endCondition, { type: "COUNT", count: 5 });
+  assert.ok((await prisma.routine.findUniqueOrThrow({ where: { id: legacyDeletedId } })).deletedAt);
+  for (const statement of ['UPDATE "RoutineScheduleVersion" SET "timezone" = \'Europe/Kyiv\' WHERE "id" = $1',
+    'DELETE FROM "RoutineScheduleVersion" WHERE "id" = $1']) {
+    await assert.rejects(sql.query(statement, [backfilledVersion.id]), (error: { code?: string }) => error.code === "23514");
+  }
   assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: ordinaryId } })).skipNote, null);
   await assert.rejects(sql.query('UPDATE "Task" SET "status" = \'SKIPPED\' WHERE "id" = $1', [ordinaryId]),
     (error: { code?: string }) => error.code === "23514");
@@ -333,4 +356,82 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   assert.equal((await request("PATCH", `/tasks/${rollbackId}`, { status: "SKIPPED", skipNote: "Rollback" })).status, 500);
   assert.deepEqual(await prisma.task.findUniqueOrThrow({ where: { id: rollbackId } }), beforeSkipFailure);
   assert.equal(await prisma.taskAction.count({ where: { taskId: rollbackId } }), beforeSkipActions);
+
+  // Version appends race the existing generation operation under the same Routine lock.
+  const boundary = Temporal.Now.instant().toZonedDateTimeISO("UTC").toPlainDate().add({ days: 10 });
+  const versionEnd = boundary.add({ days: 4 }).toString();
+  const versionInput = { title: "Version race", estimatedDurationMinutes: 10, timezone: "UTC", startDate: "2026-01-01",
+    schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 1 }, localTime: "09:00" } };
+  const versionRoutine = (await request("POST", "/routines", versionInput)).body;
+  const versionBody = { effectiveDate: boundary.toString(), timezone: "UTC", startDate: boundary.toString(),
+    schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 1 }, localTime: "18:00" }, endCondition: { type: "NEVER" } };
+  const versionRange = { from: boundary.toString(), to: versionEnd };
+  const [append, raceGeneration] = await Promise.all([
+    request("POST", `/routines/${versionRoutine.id}/schedule-versions`, versionBody),
+    request("POST", `/routines/${versionRoutine.id}/generate`, versionRange),
+  ]);
+  assert.equal(append.status, 201, JSON.stringify(append)); assert.equal(raceGeneration.status, 200, JSON.stringify(raceGeneration));
+  const frozenVersionTasks = await prisma.task.findMany({ where: { routineOccurrence: { routineId: versionRoutine.id } }, orderBy: { id: "asc" } });
+  const frozenVersionOccurrences = await prisma.routineOccurrence.findMany({ where: { routineId: versionRoutine.id }, orderBy: { id: "asc" } });
+  const versionRepeats = await Promise.all([1, 2].map(() => request("POST", `/routines/${versionRoutine.id}/generate`, versionRange)));
+  assert.ok(versionRepeats.every((response) => response.status === 200 && response.body.createdCount === 0), JSON.stringify(versionRepeats));
+  assert.equal(await prisma.routineOccurrence.count({ where: { routineId: versionRoutine.id } }), 5);
+  assert.equal(new Set(frozenVersionOccurrences.map((entry) => entry.startDate)).size, 5, "version key changes cannot duplicate occupied windows");
+  assert.deepEqual(await prisma.task.findMany({ where: { routineOccurrence: { routineId: versionRoutine.id } }, orderBy: { id: "asc" } }), frozenVersionTasks);
+  assert.deepEqual(await prisma.routineOccurrence.findMany({ where: { routineId: versionRoutine.id }, orderBy: { id: "asc" } }), frozenVersionOccurrences);
+  assert.equal(await prisma.routineScheduleVersion.count({ where: { routineId: versionRoutine.id } }), 2);
+  const nextBoundary = boundary.add({ days: 5 }).toString();
+  const appendRaces = await Promise.all([1, 2].map(() => request("POST", `/routines/${versionRoutine.id}/schedule-versions`, {
+    ...versionBody, effectiveDate: nextBoundary, startDate: nextBoundary,
+  })));
+  assert.deepEqual(appendRaces.map((response) => response.status).sort(), [201, 409]);
+  assert.equal(await prisma.routineScheduleVersion.count({ where: { routineId: versionRoutine.id } }), 3);
+  await assert.rejects(sql.query(`INSERT INTO "RoutineScheduleVersion"
+    ("id", "routineId", "number", "effectiveDate", "effectiveTimezone", "effectiveAt", "timezone", "startDate", "schedule", "endCondition")
+    SELECT $1, "routineId", 99, '2099-01-01', "effectiveTimezone", '2099-01-01T00:00:00Z', "timezone", "startDate", "schedule", "endCondition"
+    FROM "RoutineScheduleVersion" WHERE "id" = $2`, [randomUUID(), append.body.id]), (error: { code?: string }) => error.code === "23514");
+  const foreignVersion = await prisma.routineScheduleVersion.findFirstOrThrow({ where: { routineId: versionRoutine.id } });
+  await assert.rejects(prisma.routineOccurrence.create({ data: { routineId: legacyRoutineId, scheduleVersionId: foreignVersion.id,
+    occurrenceKey: "wrong-version-owner", startDate: "2026-02-01", endDate: "2026-02-01", timezone: "UTC", snapshot: {} } }),
+  (error: { code?: string }) => error.code === "P2003");
+
+  const staleRoutine = (await request("POST", "/routines", { ...versionInput, title: "Stale version planning" })).body;
+  const staleKey = (await request("GET", `/routines/${staleRoutine.id}/generation-preview?from=${versionRange.from}&to=${versionRange.from}`)).body.occurrences[0].occurrenceKey;
+  assert.equal((await request("POST", `/routines/${staleRoutine.id}/schedule-versions`, versionBody)).status, 201);
+  assert.equal((await request("POST", `/routines/${staleRoutine.id}/generate`, { ...versionRange,
+    planning: [{ occurrenceKey: staleKey, plannedAt: "2099-01-01T09:00:00Z" }] })).status, 400);
+  assert.equal(await prisma.routineOccurrence.count({ where: { routineId: staleRoutine.id } }), 0);
+
+  const versionRollback = (await request("POST", "/routines", { ...versionInput, title: "Version rollback" })).body;
+  await sql.query(`CREATE FUNCTION fail_version_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+    IF NEW."type"::text = 'SCHEDULE_VERSION_CREATED'
+      AND EXISTS (SELECT 1 FROM "Routine" WHERE "id" = NEW."routineId" AND "title" = 'Version rollback')
+    THEN RAISE EXCEPTION 'test version journal failure'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER fail_version_event BEFORE INSERT ON "RoutineAction" FOR EACH ROW EXECUTE FUNCTION fail_version_event();`);
+  const beforeVersionFailure = await prisma.routine.findUniqueOrThrow({ where: { id: versionRollback.id } });
+  const beforeVersionActions = await prisma.routineAction.count({ where: { routineId: versionRollback.id } });
+  assert.equal((await request("POST", `/routines/${versionRollback.id}/schedule-versions`, versionBody)).status, 500);
+  assert.deepEqual(await prisma.routine.findUniqueOrThrow({ where: { id: versionRollback.id } }), beforeVersionFailure);
+  assert.equal(await prisma.routineScheduleVersion.count({ where: { routineId: versionRollback.id } }), 1);
+  assert.equal(await prisma.routineAction.count({ where: { routineId: versionRollback.id } }), beforeVersionActions);
+
+  const versionCompletion = (await request("POST", "/routines", { ...completionInput, timezone: "UTC", title: "Version completion" })).body;
+  const versionFirst = (await request("POST", `/routines/${versionCompletion.id}/generate`, { from: "2026-01-01", to: "2026-01-01" })).body.created[0];
+  const completionBoundary = Temporal.Now.instant().toZonedDateTimeISO("UTC").toPlainDate().add({ days: 1 }).toString();
+  const completionVersion = await request("POST", `/routines/${versionCompletion.id}/schedule-versions`, {
+    ...versionBody, effectiveDate: completionBoundary, startDate: "2026-01-01",
+    schedule: { version: 1, recurrence: { type: "AFTER_COMPLETION", intervalDays: 4 } }, endCondition: { type: "COUNT", count: 2 },
+  });
+  assert.equal(completionVersion.status, 201, JSON.stringify(completionVersion));
+  const versionSkip = await request("PATCH", `/tasks/${versionFirst.taskId}`, { status: "SKIPPED" });
+  assert.equal(versionSkip.status, 200);
+  const versionNextDate = Temporal.Instant.from(versionSkip.body.skippedAt).toZonedDateTimeISO("UTC").toPlainDate().add({ days: 4 }).toString();
+  const versionSuccessor = await request("POST", `/routines/${versionCompletion.id}/generate`, { from: versionNextDate, to: versionNextDate });
+  assert.equal(versionSuccessor.status, 200, JSON.stringify(versionSuccessor)); assert.equal(versionSuccessor.body.createdCount, 1);
+  const versionSecond = await prisma.routineOccurrence.findFirstOrThrow({ where: { routineId: versionCompletion.id, occurrenceNumber: 2 } });
+  assert.equal(versionSecond.scheduleVersionId, completionVersion.body.id); assert.equal(versionSecond.basisType, "SKIPPED");
+  assert.equal(versionSecond.basisAt!.toISOString(), versionSkip.body.skippedAt); assert.equal(versionSecond.basisCompletedAt, null);
+  await request("PATCH", `/tasks/${versionFirst.taskId}`, { status: "TODO" });
+  assert.equal((await request("POST", `/routines/${versionCompletion.id}/generate`, { from: versionNextDate, to: versionNextDate })).body.createdCount, 0);
+  assert.deepEqual(await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: versionSecond.id } }), versionSecond);
 });

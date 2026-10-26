@@ -16,7 +16,9 @@ const snapshotSchema = z.strictObject({
   pausedAt: z.iso.datetime().nullable(), deletedAt: z.iso.datetime().nullable(),
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
 });
-export const routineActionMetadataSchema = z.strictObject({ before: snapshotSchema.nullable(), after: snapshotSchema });
+export const routineActionMetadataSchema = z.strictObject({ before: snapshotSchema.nullable(), after: snapshotSchema,
+  effectiveDate: localDateSchema.optional(), scheduleVersionId: z.uuid().optional(), versionNumber: z.number().int().min(2).optional(),
+});
 
 export function toRoutineResponse(routine: RoutineWithRelations) {
   try {
@@ -38,6 +40,9 @@ export function toRoutineResponse(routine: RoutineWithRelations) {
 export function toRoutineActionResponse(action: RoutineAction) {
   try {
     const metadata = routineActionMetadataSchema.parse(action.metadata);
+    if (action.type === "SCHEDULE_VERSION_CREATED" && (!metadata.effectiveDate || !metadata.scheduleVersionId || !metadata.versionNumber)) {
+      throw new Error("Missing schedule version metadata.");
+    }
     if ((action.type === "CREATED") !== (metadata.before === null)) throw new Error("Invalid creation snapshot.");
     for (const snapshot of [metadata.before, metadata.after]) {
       if (!snapshot) continue;

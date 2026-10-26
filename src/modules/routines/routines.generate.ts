@@ -58,6 +58,20 @@ function configurationEffectiveDate(routine: GenerationRoutine, actions: readonl
         changes.set(JSON.stringify([stateKey(entry.before), stateKey(entry.after)]), entry);
       }
     }
+    if (changes.size > 1 && [...changes.values()].every((entry) => entry.action.type === "SCHEDULE_VERSION_CREATED")) {
+      // Persisted version numbers establish order even if multiple appends share a millisecond.
+      const ordered = [...changes.values()].sort((a, b) => a.versionNumber! - b.versionNumber!);
+      const known = new Set([current]);
+      for (const entry of ordered) {
+        if (stateKey(entry.before!) !== current) generationConflict("Routine schedule version history has a gap.");
+        current = stateKey(entry.after); known.add(current);
+      }
+      if (group.some((entry) => [entry.before, entry.after].some((snapshot) => snapshot && !known.has(stateKey(snapshot))))) {
+        generationConflict("Routine history has inconsistent schedule version snapshots.");
+      }
+      effectiveDate = Temporal.Instant.fromEpochMilliseconds(time).toZonedDateTimeISO(routine.timezone).toPlainDate().toString();
+      continue;
+    }
     if (changes.size > 1) generationConflict("Routine history has ambiguous simultaneous configuration changes.");
     const change = [...changes.values()][0];
     if (change && stateKey(change.before!) !== current) generationConflict("Routine history has a configuration or pause gap.");
@@ -80,19 +94,19 @@ function configurationEffectiveDate(routine: GenerationRoutine, actions: readonl
   return effectiveDate;
 }
 
-export function readGenerationHistory(routine: GenerationRoutine, actions: readonly RoutineAction[]) {
+export function readGenerationHistory(routine: GenerationRoutine, actions: readonly RoutineAction[], versioned = false) {
   if (routine.pausedAt) generationConflict("Routine is paused. Resume it before generation.");
   if (actions.length > PREVIEW_HISTORY_BUDGET) generationConflict("Routine history budget exceeded. Generation cannot use a partial history.");
   let history: ReturnType<typeof normalizePreviewHistory>;
   let effectiveDate: string | null;
   try {
-    history = normalizePreviewHistory(routine, actions);
+    history = normalizePreviewHistory(routine, actions, versioned);
     effectiveDate = configurationEffectiveDate(routine, actions);
   } catch (error) {
     if (error instanceof ApiError) throw error;
     return generationConflict("Routine history is invalid. Generation requires a consistent history.");
   }
-  return { history, effectiveDate };
+  return { history, effectiveDate: versioned ? null : effectiveDate };
 }
 
 export function planRoutineGeneration(routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerationRange) {

@@ -185,7 +185,7 @@ test("configuration changes, missing events and timestamp ties report COUNT unce
     else if (mode === "tie") {
       await f.routineRequest("PATCH", `/${r.id}`, { paused: true });
       await f.routineRequest("PATCH", `/${r.id}`, { paused: false });
-    } else await f.routineRequest("PATCH", `/${r.id}`, mode === "schedule"
+    } else f.legacyCalendarEdit(r.id, mode === "schedule"
       ? { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 3 } } }
       : mode === "timezone" ? { timezone: "UTC" } : mode === "startDate" ? { startDate: "2026-10-24" }
       : { endCondition: { type: "COUNT", count: 5 } });
@@ -242,7 +242,7 @@ test("non-COUNT previews expose projection/history uncertainty and still apply a
   f.setTime(new Date("2026-10-25T12:00:00Z"));
   const r = (await f.routineRequest("POST", "", input)).body;
   f.setTime(new Date("2026-10-27T12:00:00Z"));
-  await f.routineRequest("PATCH", `/${r.id}`, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 3 } } });
+  f.legacyCalendarEdit(r.id, { schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 3 } } });
   const base = `/${r.id}/preview?from=2026-10-25&to=2026-11-07`;
   const changed = await f.routineRequest("GET", base);
   assert.ok(changed.body.limitations.includes("CONFIGURATION_CHANGED"));

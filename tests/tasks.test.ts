@@ -526,7 +526,7 @@ test("invalid nested creation and duration overflow fail before opening a transa
     assert.equal((await f.request("POST", "", data)).status, 400, JSON.stringify(data));
   }
   assert.equal(f.attempts(), 0);
-  assert.deepEqual(f.state(), { tasks: [], subtasks: [], actions: [], areas: [], routines: [], routineSubtasks: [], routineActions: [], occurrences: [] });
+  assert.deepEqual(f.state(), { tasks: [], subtasks: [], actions: [], areas: [], routines: [], routineSubtasks: [], routineActions: [], occurrences: [], scheduleVersions: [] });
   const atLimit = await f.request("POST", "", {
     ...body, subtasks: [{ title: "Almost max", estimatedDurationMinutes: 2_147_483_646 }, { title: "Last", estimatedDurationMinutes: 1 }],
   });

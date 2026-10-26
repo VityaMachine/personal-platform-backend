@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import type { TestContext } from "node:test";
 import express from "express";
 
-import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, type Area, type Routine, type RoutineSubtask, type RoutineAction, type RoutineOccurrence } from "../../src/generated/prisma/client";
+import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, type Area, type Routine, type RoutineSubtask, type RoutineAction, type RoutineOccurrence, type RoutineScheduleVersion } from "../../src/generated/prisma/client";
 import { errorHandler } from "../../src/middleware/error-handler";
 import { createRequestLogger } from "../../src/middleware/request-logger";
 import { createLogger } from "../../src/lib/logger";
@@ -26,8 +26,8 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   const tieSubtaskTimestamps = initialSubtaskIds.length > 0;
   let state: { tasks: Task[]; actions: TaskAction[]; subtasks: Subtask[]; areas: Area[];
     routines: Routine[]; routineSubtasks: RoutineSubtask[]; routineActions: RoutineAction[];
-    occurrences: RoutineOccurrence[];
-  } = { tasks: [], actions: [], subtasks: [], areas: [], routines: [], routineSubtasks: [], routineActions: [], occurrences: [] };
+    occurrences: RoutineOccurrence[]; scheduleVersions: RoutineScheduleVersion[];
+  } = { tasks: [], actions: [], subtasks: [], areas: [], routines: [], routineSubtasks: [], routineActions: [], occurrences: [], scheduleVersions: [] };
   let revision = 0;
   let occurrenceConflicts = 0;
   let occurrencesBeforeFailure: number | undefined;
@@ -60,7 +60,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
       routineOccurrence: (() => {
         const occurrence = db.occurrences.find((entry) => entry.id === task.routineOccurrenceId);
         if (!occurrence) return null;
-        const { snapshot: _snapshot, createdAt: _createdAt, ...fields } = occurrence;
+        const { snapshot: _snapshot, createdAt: _createdAt, scheduleVersionId: _version, ...fields } = occurrence;
         return fields;
       })(),
       area: (() => {
@@ -123,6 +123,20 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
         });
       }
       return structuredClone(db.areas.filter((area) => area.id === id));
+    },
+    routineScheduleVersion: {
+      async findMany({ where, take }: { where: { routineId: string }; take: number }) {
+        return structuredClone(db.scheduleVersions.filter((entry) => entry.routineId === where.routineId)
+          .sort((a, b) => a.number - b.number).slice(0, take));
+      },
+      async create({ data }: { data: Omit<RoutineScheduleVersion, "id" | "createdAt"> }) {
+        const previous = db.scheduleVersions.filter((entry) => entry.routineId === data.routineId).at(-1);
+        assert.equal(data.number, (previous?.number ?? 0) + 1);
+        if (previous) { assert.ok(data.effectiveDate > previous.effectiveDate); assert.ok(data.effectiveAt > previous.effectiveAt); }
+        const entry = { ...data, id: randomUUID(), createdAt: now() };
+        db.scheduleVersions.push(entry);
+        return structuredClone(entry);
+      },
     },
     routineOccurrence: {
       async findFirst({ where }: { where: { routineId: string } }) {
@@ -393,6 +407,18 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   return {
     request, areaRequest, routineRequest, logs, reads, operations, state: () => state, setTime: (time: Date) => { fixedTime = time; },
     taskClockCalls: () => taskClockCalls,
+    // Seed pre-versioning journal changes for legacy-history regression tests, not an API write.
+    legacyCalendarEdit(id: string, patch: Partial<Routine>) {
+      const routine = state.routines.find((entry) => entry.id === id)!;
+      const include = { area: { select: { id: true, name: true } }, subtasks: { orderBy: [{ position: "asc" }, { id: "asc" }] } };
+      const before = routineResult(state, routine, include);
+      Object.assign(routine, patch, { updatedAt: now() });
+      const version = state.scheduleVersions.find((entry) => entry.routineId === id)!;
+      Object.assign(version, { timezone: routine.timezone, startDate: routine.startDate,
+        schedule: routine.schedule, endCondition: routine.endCondition });
+      state.routineActions.push({ id: randomUUID(), routineId: id, type: "UPDATED", timestamp: now(),
+        metadata: JSON.parse(JSON.stringify({ before, after: routineResult(state, routine, include) })) });
+    },
     failRoutineWrites: (after = 0) => { routineWritesBeforeFailure = after; },
     occurrenceConflicts: (count: number) => { occurrenceConflicts = count; },
     failOccurrences: (after = 0) => { occurrencesBeforeFailure = after; },

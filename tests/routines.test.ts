@@ -129,12 +129,11 @@ test("PATCH validates merged dates and complete replacement schedule, including 
     startDate: "2026-11-02", endCondition: { type: "UNTIL_DATE", date: "2026-11-02" },
     schedule: { version: 1, recurrence: { type: "AFTER_COMPLETION", intervalDays: 90 }, localTime: "09:00" },
   });
-  assert.equal(changed.status, 200);
-  assert.equal(changed.body.schedule.localTime, "09:00");
-  assert.equal(changed.body.estimatedDurationMinutes, 30);
+  assert.equal(changed.status, 409, "calendar changes require an explicit immutable version");
+  assert.deepEqual(f.state(), before);
   const replaced = await f.routineRequest("PATCH", `/${created.id}`, { schedule: input.schedule });
   assert.equal(replaced.body.schedule.localTime, null);
-  assert.equal(replaced.body.startDate, "2026-11-02");
+  assert.equal(replaced.body.startDate, "2026-10-25");
 });
 
 test("Areas can be assigned/cleared; snapshots survive rename; deletion atomically detaches Tasks and all Routines", async (t) => {

@@ -85,6 +85,7 @@ enum RoutineActionType {
   PAUSED
   RESUMED
   DELETED
+  SCHEDULE_VERSION_CREATED
 }
 
 model Routine {
@@ -106,9 +107,31 @@ model Routine {
   subtasks                 RoutineSubtask[]
   actions                  RoutineAction[]
   occurrences              RoutineOccurrence[]
+  scheduleVersions         RoutineScheduleVersion[]
 
   @@index([deletedAt, createdAt(sort: Desc), id])
   @@index([areaId])
+}
+
+model RoutineScheduleVersion {
+  id                String @id @default(uuid()) @db.Uuid
+  routineId         String @db.Uuid
+  number            Int
+  effectiveDate     String @db.VarChar(10)
+  effectiveTimezone String @db.VarChar(100)
+  effectiveAt       DateTime @db.Timestamptz(3)
+  timezone          String @db.VarChar(100)
+  startDate         String @db.VarChar(10)
+  schedule          Json
+  endCondition      Json
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  routine           Routine @relation(fields: [routineId], references: [id], onDelete: Restrict)
+  occurrences       RoutineOccurrence[]
+
+  @@unique([routineId, number])
+  @@unique([routineId, effectiveDate])
+  @@unique([routineId, effectiveAt])
+  @@unique([routineId, id])
 }
 
 model RoutineOccurrence {
@@ -123,6 +146,8 @@ model RoutineOccurrence {
   snapshot      Json
   createdAt     DateTime @default(now()) @db.Timestamptz(3)
   routine       Routine  @relation(fields: [routineId], references: [id], onDelete: Restrict)
+  scheduleVersionId String @db.Uuid
+  scheduleVersion RoutineScheduleVersion @relation(fields: [routineId, scheduleVersionId], references: [routineId, id], onDelete: Restrict)
   task          Task?
   occurrenceNumber Int?
   previousOccurrenceId String? @unique @db.Uuid
