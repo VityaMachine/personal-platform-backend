@@ -7,6 +7,7 @@ import type { RoutinesTransactionRepository } from "./routines.repository";
 import { parseScheduleVersions, validateScheduleVersionHistory, type ScheduleVersion } from "./routines.versions";
 import { resolveVersionedCalendar } from "./routines.versioned-calendar";
 import type { WindowConflict } from "./routines.version-conflicts";
+import type { AutomaticGeneration } from "./routines.auto-range";
 
 export type ResolvedGenerationOccurrence = {
   occurrence: PreviewOccurrence;
@@ -19,14 +20,15 @@ export type ResolvedGenerationOccurrence = {
 export async function resolveRoutineGeneration(
   routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerationRange,
   tx: RoutinesTransactionRepository, asOf: Date,
+  automatic?: AutomaticGeneration,
 ): Promise<{ candidates: ResolvedGenerationOccurrence[]; conflicts: WindowConflict[] }> {
   const versions = parseScheduleVersions(await tx.findScheduleVersions(routine.id));
   validateScheduleVersionHistory(routine, versions, actions);
   if (routine.schedule.recurrence.type === "AFTER_COMPLETION") {
-    return { candidates: await resolveCompletionGeneration(routine, actions, range, tx, asOf, versions), conflicts: [] };
+    return { candidates: await resolveCompletionGeneration(routine, actions, range, tx, asOf, versions, Boolean(automatic)), conflicts: [] };
   }
   if (versions.length > 1) return resolveVersionedCalendar(routine, actions, versions,
-    await tx.findCompletionChain(routine.id, 10_001), range, true);
+    await tx.findCompletionChain(routine.id, 10_001), range, true, automatic);
   const candidates = planRoutineGeneration(routine, actions, range);
   const stored = candidates.length ? await tx.findOccurrences(routine.id, candidates.map((entry) => entry.occurrenceKey)) : [];
   const byKey = new Map(stored.map((entry) => [entry.occurrenceKey, entry]));

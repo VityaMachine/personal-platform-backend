@@ -13,7 +13,9 @@ import { createRoutinesRouter } from "../src/modules/routines/routines.routes";
 import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
 import { createAreasRouter } from "../src/modules/areas/areas.routes";
 import { errorHandler } from "../src/middleware/error-handler";
-import { isRoutineOccurrenceUniqueConflict } from "../src/modules/routines/routines.repository";
+import { isRoutineOccurrenceUniqueConflict, createRoutinesRepository } from "../src/modules/routines/routines.repository";
+import { createRoutinesService } from "../src/modules/routines/routines.service";
+import { createRoutineRunner } from "../src/modules/routines/routines.runner";
 import { Temporal } from "@js-temporal/polyfill";
 
 // Opt-in only. All migrations, including old data-changing migrations, run in a NEW isolated schema.
@@ -67,6 +69,12 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
     await sql.query(await readFile(path.join(directory, migration, "migration.sql"), "utf8"));
   }
   assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: ordinaryId } })).routineOccurrenceId, null);
+  for (const legacyId of [legacyRoutineId, legacyPausedId, legacyDeletedId]) {
+    const routine = await prisma.routine.findUniqueOrThrow({ where: { id: legacyId } });
+    assert.equal(routine.autoGenerate, false); assert.equal(routine.generationHorizonDays, 7);
+  }
+  for (const invalid of [0, 31]) await assert.rejects(sql.query('UPDATE "Routine" SET "generationHorizonDays" = $1 WHERE "id" = $2',
+    [invalid, legacyRoutineId]), (error: { code?: string }) => error.code === "23514");
   const legacy = await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: legacyOccurrenceId } });
   assert.equal(legacy.occurrenceNumber, null); assert.equal(legacy.previousOccurrenceId, null); assert.equal(legacy.basisCompletedAt, null);
   assert.equal(legacy.basisType, null); assert.equal(legacy.basisAt, null);
@@ -434,4 +442,70 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
   await request("PATCH", `/tasks/${versionFirst.taskId}`, { status: "TODO" });
   assert.equal((await request("POST", `/routines/${versionCompletion.id}/generate`, { from: versionNextDate, to: versionNextDate })).body.createdCount, 0);
   assert.deepEqual(await prisma.routineOccurrence.findUniqueOrThrow({ where: { id: versionSecond.id } }), versionSecond);
+
+  await t.test("two runners and manual generation use real PostgreSQL locks and preserve planning", async () => {
+    const repository = createRoutinesRepository(() => prisma);
+    const service = createRoutinesService(repository);
+    const today = Temporal.Now.instant().toZonedDateTimeISO("UTC").toPlainDate().toString();
+    const routine = (await request("POST", "/routines", { ...versionInput, autoGenerate: true })).body;
+    const logger = { info() {}, warn() {} };
+    const first = createRoutineRunner({ repository, service, logger });
+    const second = createRoutineRunner({ repository, service, logger });
+    const manualRange = { from: today, to: Temporal.PlainDate.from(today).add({ days: 6 }).toString() };
+    const manual = service.generate(routine.id, manualRange);
+    const results = await Promise.all([first.runOnce(), second.runOnce(), manual]);
+    assert.equal(results[0].errors + results[1].errors, 0);
+    assert.equal(results[0].created + results[1].created + results[2].createdCount, 7);
+    assert.equal(await prisma.routineOccurrence.count({ where: { routineId: routine.id } }), 7);
+    const task = await prisma.task.findFirstOrThrow({ where: { routineOccurrence: { routineId: routine.id } } });
+    await request("PATCH", `/tasks/${task.id}`, { plannedAt: "2099-01-01T12:00:00Z" });
+    const before = await prisma.task.findMany({ where: { routineOccurrence: { routineId: routine.id } }, orderBy: { id: "asc" } });
+    await first.runOnce(); await first.runOnce();
+    assert.deepEqual(await prisma.task.findMany({ where: { routineOccurrence: { routineId: routine.id } }, orderBy: { id: "asc" } }), before);
+    await first.stop(); await second.stop();
+    await request("PATCH", `/routines/${routine.id}`, { autoGenerate: false });
+  });
+
+  for (const patch of [{ autoGenerate: false }, { paused: true }, { generationHorizonDays: 1 }]) {
+    await t.test(`settings change before runner lock is rechecked: ${JSON.stringify(patch)}`, async () => {
+      const routine = (await request("POST", "/routines", { ...versionInput, autoGenerate: true })).body;
+      const repository = createRoutinesRepository(() => prisma);
+      let signal!: () => void, release!: () => void;
+      const entered = new Promise<void>((resolve) => { signal = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let gated = false;
+      const service = createRoutinesService({ ...repository, transaction: (work) => repository.transaction(async (tx) => {
+        const originalLock = tx.lock;
+        return work({ ...tx, async lock(id) {
+          if (!gated) { gated = true; signal(); await gate; }
+          return originalLock(id);
+        } });
+      }) });
+      const generation = service.generateAutomatically(routine.id);
+      await entered;
+      try { assert.equal((await request("PATCH", `/routines/${routine.id}`, patch)).status, 200); }
+      finally { release(); }
+      const generated = await generation;
+      if ("generationHorizonDays" in patch) assert.equal(generated!.createdCount, 1);
+      else assert.equal(generated, null);
+      assert.equal(await prisma.routineOccurrence.count({ where: { routineId: routine.id } }), "generationHorizonDays" in patch ? 1 : 0);
+    });
+  }
+
+  await t.test("runner journal failure fully rolls back one routine and processes the next", async () => {
+    const routine = (await request("POST", "/routines", { ...versionInput, title: "Auto rollback", autoGenerate: true })).body;
+    const healthy = (await request("POST", "/routines", { ...versionInput, autoGenerate: true })).body;
+    await sql.query(`CREATE FUNCTION fail_auto_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW."type" = 'CREATED' AND EXISTS (SELECT 1 FROM "Task" WHERE "id" = NEW."taskId" AND "title" = 'Auto rollback')
+      THEN RAISE EXCEPTION 'test automatic journal failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER fail_auto_event BEFORE INSERT ON "TaskAction" FOR EACH ROW EXECUTE FUNCTION fail_auto_event();`);
+    const repository = createRoutinesRepository(() => prisma);
+    const runner = createRoutineRunner({ repository, service: createRoutinesService(repository), logger: { info() {}, warn() {} } });
+    const result = await runner.runOnce();
+    assert.equal(result.errors, 1);
+    assert.equal(await prisma.routineOccurrence.count({ where: { routineId: routine.id } }), 0);
+    assert.equal(await prisma.task.count({ where: { title: "Auto rollback" } }), 0);
+    assert.equal(await prisma.routineOccurrence.count({ where: { routineId: healthy.id } }), 7);
+    await runner.stop();
+  });
 });

@@ -80,6 +80,12 @@ export function isRoutineOccurrenceUniqueConflict(error: Prisma.PrismaClientKnow
 }
 export function createRoutinesRepository(client: () => PrismaClient = getPrisma) {
   return {
+    async findAutomaticCandidates(afterId: string | undefined, take: number) {
+      return client().$transaction((tx) => tx.routine.findMany({
+        where: { autoGenerate: true, pausedAt: null, deletedAt: null, ...(afterId ? { id: { gt: afterId } } : {}) },
+        orderBy: { id: "asc" }, take, select: { id: true },
+      }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000 });
+    },
     async transaction<T>(work: (tx: RoutinesTransactionRepository) => Promise<T>): Promise<T> {
       const db = client();
       for (let attempt = 0; ; attempt++) {

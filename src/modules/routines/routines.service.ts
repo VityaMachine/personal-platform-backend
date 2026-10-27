@@ -12,6 +12,7 @@ import { resolveRoutineGeneration, validateGenerationPlanning } from "./routines
 import { appendScheduleVersion } from "./routines.versions.service";
 import { calendarSnapshot, parseScheduleVersions, resolveCompletionVersion, validateScheduleVersionHistory, versionMidnight, versionedKey,
   type CreateScheduleVersionInput } from "./routines.versions";
+import { currentAutomaticRange } from "./routines.auto-range";
 import { resolveVersionedCalendar } from "./routines.versioned-calendar";
 
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
@@ -46,11 +47,35 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
   }
   function state(routine: Awaited<ReturnType<typeof find>>): RoutineState {
     return routineStateSchema.parse({
+      autoGenerate: routine.autoGenerate, generationHorizonDays: routine.generationHorizonDays,
       title: routine.title, description: routine.description, priority: routine.priority, areaId: routine.areaId,
       estimatedDurationMinutes: routine.estimatedDurationMinutes, timezone: routine.timezone,
       startDate: routine.startDate, schedule: routine.schedule, endCondition: routine.endCondition,
       subtasks: routine.subtasks.map(({ title, estimatedDurationMinutes }) => ({ title, estimatedDurationMinutes })),
     });
+  }
+  async function persistGeneration(id: string, range: GenerationRange, resolved: Awaited<ReturnType<typeof resolveGeneration>>,
+    tx: RoutinesTransactionRepository, input: Pick<GenerateRoutineInput, "planning"> = {}) {
+    const { routine, candidates, conflicts } = resolved;
+    const planning = validateGenerationPlanning(routine, candidates, input.planning);
+    const created: { occurrenceKey: string; taskId: string }[] = [];
+    const existing: typeof created = [];
+    // Resolve and validate the entire planning map before any writes.
+    for (const { occurrence: candidate, chain, existingTaskId, scheduleVersion } of candidates) {
+      if (existingTaskId !== null) { existing.push({ occurrenceKey: candidate.occurrenceKey, taskId: existingTaskId }); continue; }
+      const { diagnostics: _diagnostics, ...calendar } = candidate;
+      const occurrence = await tx.createOccurrence({ ...calendar, ...chain, routineId: id, scheduleVersionId: scheduleVersion!.id,
+        instant: calendar.instant === null ? null : new Date(calendar.instant),
+        snapshot: JSON.parse(JSON.stringify({ ...routine, ...calendarSnapshot(scheduleVersion!) })) as Prisma.InputJsonValue });
+      const { snapshot: _snapshot, createdAt: _createdAt, ...origin } = occurrence;
+      const task = await createTaskWithSubtasks(tx.tasks, {
+        title: routine.title, description: routine.description, priority: routine.priority,
+        estimatedDurationMinutes: routine.estimatedDurationMinutes, plannedAt: planning.get(candidate.occurrenceKey) ?? null, dueAt: null,
+      }, routine.subtasks, { area: routine.area, routineOccurrence: { ...origin, snapshot: occurrence.snapshot } });
+      created.push({ occurrenceKey: occurrence.occurrenceKey, taskId: task.id });
+    }
+    return { routineId: id, ...range, createdCount: created.length, existingCount: existing.length, created, existing,
+      ...(conflicts.length ? { conflicts } : {}) };
   }
   return {
     list() { return transaction(async (tx) => (await tx.findMany({ deletedAt: null })).map(toRoutineResponse)); },
@@ -77,25 +102,25 @@ export function createRoutinesService(repository: RoutinesRepository, now: () =>
       const range = { from: input.from, to: input.to };
       return transaction(async (tx) => {
         const { routine, candidates, conflicts } = await resolveGeneration(id, range, tx);
-        const planning = validateGenerationPlanning(routine, candidates, input.planning);
-        const created: { occurrenceKey: string; taskId: string }[] = [];
-        const existing: typeof created = [];
-        // Resolve and validate the entire planning map before any writes.
-        for (const { occurrence: candidate, chain, existingTaskId, scheduleVersion } of candidates) {
-          if (existingTaskId !== null) { existing.push({ occurrenceKey: candidate.occurrenceKey, taskId: existingTaskId }); continue; }
-          const { diagnostics: _diagnostics, ...calendar } = candidate;
-          const occurrence = await tx.createOccurrence({ ...calendar, ...chain, routineId: id, scheduleVersionId: scheduleVersion!.id,
-            instant: calendar.instant === null ? null : new Date(calendar.instant),
-            snapshot: JSON.parse(JSON.stringify({ ...routine, ...calendarSnapshot(scheduleVersion!) })) as Prisma.InputJsonValue });
-          const { snapshot: _snapshot, createdAt: _createdAt, ...origin } = occurrence;
-          const task = await createTaskWithSubtasks(tx.tasks, {
-            title: routine.title, description: routine.description, priority: routine.priority,
-            estimatedDurationMinutes: routine.estimatedDurationMinutes, plannedAt: planning.get(candidate.occurrenceKey) ?? null, dueAt: null,
-          }, routine.subtasks, { area: routine.area, routineOccurrence: { ...origin, snapshot: occurrence.snapshot } });
-          created.push({ occurrenceKey: occurrence.occurrenceKey, taskId: task.id });
-        }
-        return { routineId: id, ...range, createdCount: created.length, existingCount: existing.length, created, existing,
-          ...(conflicts.length ? { conflicts } : {}) };
+        return persistGeneration(id, range, { routine, candidates, conflicts }, tx, input);
+      });
+    },
+    generateAutomatically(id: string) {
+      return transaction(async (tx) => {
+        const initial = await tx.findFirst(id);
+        if (!initial) return null;
+        await checkArea(initial.areaId, tx);
+        await tx.lock(id);
+        // Recheck eligibility under the manual generation / settings mutation lock.
+        const stored = await tx.findFirst(id);
+        if (!stored || !stored.autoGenerate || stored.pausedAt) return null;
+        const routine = toRoutineResponse(stored);
+        const automatic = { asOf: now(), horizonDays: routine.generationHorizonDays };
+        const versions = parseScheduleVersions(await tx.findScheduleVersions(id));
+        const range = currentAutomaticRange(versions, automatic);
+        const actions = await tx.findHistory(id, PREVIEW_HISTORY_BUDGET + 1);
+        const resolved = await resolveRoutineGeneration(routine, actions, range, tx, automatic.asOf, automatic);
+        return persistGeneration(id, range, { routine, ...resolved }, tx);
       });
     },
     preview(id: string, query: RoutinePreviewQuery) {

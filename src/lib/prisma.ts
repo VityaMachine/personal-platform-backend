@@ -4,6 +4,8 @@ import { PrismaClient } from "../generated/prisma/client";
 
 let prisma: PrismaClient | undefined;
 
+export async function disconnectPrisma() { await prisma?.$disconnect(); }
+
 export function getPrisma(): PrismaClient {
   if (!prisma) {
     const connectionString = process.env.DATABASE_URL;

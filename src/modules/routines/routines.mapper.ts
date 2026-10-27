@@ -6,6 +6,8 @@ import { routineStateSchema, routineSubtaskInputSchema } from "./routines.schema
 import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./routines.schedule";
 
 const snapshotSchema = z.strictObject({
+  autoGenerate: z.boolean().optional(),
+  generationHorizonDays: z.number().int().min(1).max(30).optional(),
   id: z.uuid(), title: taskFields.title, description: z.string().nullable(), priority: z.enum(TaskPriority),
   areaId: z.uuid().nullable(), area: z.strictObject({ id: z.uuid(), name: z.string().min(1).max(80) }).nullable(),
   estimatedDurationMinutes: taskFields.duration, timezone: timezoneSchema, startDate: localDateSchema,
@@ -23,6 +25,7 @@ export const routineActionMetadataSchema = z.strictObject({ before: snapshotSche
 export function toRoutineResponse(routine: RoutineWithRelations) {
   try {
     const parsed = routineStateSchema.safeParse({
+      autoGenerate: routine.autoGenerate, generationHorizonDays: routine.generationHorizonDays,
       title: routine.title, description: routine.description, priority: routine.priority, areaId: routine.areaId,
       estimatedDurationMinutes: routine.estimatedDurationMinutes,
       subtasks: routine.subtasks.map(({ title, estimatedDurationMinutes }) => ({ title, estimatedDurationMinutes })),

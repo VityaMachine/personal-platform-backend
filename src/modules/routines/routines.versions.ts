@@ -73,11 +73,13 @@ export function versionedKey(key: string, version: ScheduleVersion) {
 export function calculateVersionedCandidates(
   routine: PreviewRoutine, versions: readonly ScheduleVersion[], from: string, to: string,
   optionsFor: (version: ScheduleVersion) => PreviewOptions,
+  rangeFor?: (version: ScheduleVersion) => { from: string; to: string },
 ) {
   const candidates: VersionedOccurrence[] = [], limitations = new Set<string>();
   let truncated = false;
   for (const [index, version] of versions.entries()) {
-    const result = calculateRoutinePreview({ ...routine, ...version, id: routine.id }, from, to, 500, optionsFor(version));
+    const range = rangeFor?.(version) ?? { from, to };
+    const result = calculateRoutinePreview({ ...routine, ...version, id: routine.id }, range.from, range.to, 500, optionsFor(version));
     for (const limitation of result.limitations) limitations.add(limitation);
     truncated ||= result.truncated;
     for (const occurrence of result.occurrences) if (ownsWindow(versions, index, occurrence)) {

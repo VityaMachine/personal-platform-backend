@@ -99,6 +99,8 @@ model Routine {
   startDate                String       @db.VarChar(10)
   schedule                 Json
   endCondition             Json
+  autoGenerate             Boolean      @default(false)
+  generationHorizonDays    Int          @default(7)
   pausedAt                 DateTime?    @db.Timestamptz(3)
   deletedAt                DateTime?    @db.Timestamptz(3)
   createdAt                DateTime     @default(now()) @db.Timestamptz(3)
@@ -111,6 +113,7 @@ model Routine {
 
   @@index([deletedAt, createdAt(sort: Desc), id])
   @@index([areaId])
+  @@index([autoGenerate, pausedAt, deletedAt, id])
 }
 
 model RoutineScheduleVersion {

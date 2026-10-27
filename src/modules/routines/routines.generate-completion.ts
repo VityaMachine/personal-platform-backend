@@ -16,6 +16,7 @@ export async function resolveCompletionGeneration(
   routine: GenerationRoutine, actions: readonly RoutineAction[], range: GenerationRange,
   tx: RoutinesTransactionRepository, asOf: Date,
   versions: readonly ScheduleVersion[],
+  automatic = false,
 ): Promise<ResolvedGenerationOccurrence[]> {
   const { history, effectiveDate } = readGenerationHistory(routine, actions, versions.length > 1);
   const blocking = history.limitations.filter((code) => code !== "CONFIGURATION_CHANGED");
@@ -43,8 +44,8 @@ export async function resolveCompletionGeneration(
       scheduleVersion: versions.find((version) => version.id === entry.scheduleVersionId) }));
   // COUNT counts persisted executions, including canceled/deleted tasks, not projected days.
   if (versions.length === 1 && routine.endCondition.type === "COUNT" && chain.length >= routine.endCondition.count) return existing;
-  if (versions.length === 1 && routine.endCondition.type === "UNTIL_DATE" && range.from > routine.endCondition.date) return existing;
-  if (range.to < routine.startDate) return existing;
+  if (!automatic && versions.length === 1 && routine.endCondition.type === "UNTIL_DATE" && range.from > routine.endCondition.date) return existing;
+  if (!automatic && range.to < routine.startDate) return existing;
   const latest = chain.at(-1);
   let completionContext: { completedAt: string; completedOccurrenceNumber: number } | undefined;
   let basisCompletedAt: Date | null = null;
@@ -56,6 +57,7 @@ export async function resolveCompletionGeneration(
     const task = await tx.tasks.findFirst({ id: latest.task!.id });
     if (!task) generationConflict("The latest completion Task is missing. Generation requires repair.");
     if (task.deletedAt || (task.status !== "DONE" && task.status !== "SKIPPED")) {
+      if (automatic) return existing;
       // A network retry finds its saved result even if that result is TODO/canceled/deleted now.
       if (existing.length) return existing;
       if (task.deletedAt) generationConflict("The latest Task is deleted. The completion chain is stopped; Tasks are not replaced.");
@@ -91,12 +93,12 @@ export async function resolveCompletionGeneration(
   if (calendar.date === null) generationConflict(`Completion calendar is incomplete: ${calendar.limitation}.`);
   const date = calendar.date;
   if (selectedVersion.endCondition.type === "UNTIL_DATE" && date > selectedVersion.endCondition.date) return existing;
-  if (date < range.from || date > range.to) return existing;
+  if (!automatic && (date < range.from || date > range.to)) return existing;
   if (effectiveDate && date <= effectiveDate) generationConflict("Occurrence starts on or before the latest configuration change. Generation requires a later start.");
   if (selectedHistory.pauses.some((pause) => pause.startDate <= date && (pause.endDate === null || date < pause.endDate))) {
     generationConflict("The completion occurrence falls in a past pause. A separate decision is required; its date is not shifted or skipped.");
   }
-  const preview = calculateRoutinePreview(selectedRoutine, range.from, range.to, 1, { ...selectedHistory, countReliable: true, completionContext });
+  const preview = calculateRoutinePreview(selectedRoutine, automatic ? date : range.from, automatic ? date : range.to, 1, { ...selectedHistory, countReliable: true, completionContext });
   const limitations = preview.limitations.filter((code) => !["CURRENT_CONFIGURATION_PROJECTION", "CONFIGURATION_CHANGED", "FUTURE_COMPLETIONS_REQUIRED"].includes(code));
   if (limitations.length || preview.truncated || preview.occurrences.length !== 1) {
     generationConflict(`Completion calendar is incomplete: ${limitations.join(", ") || "MISSING_CANDIDATE"}.`);

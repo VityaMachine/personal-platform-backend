@@ -405,6 +405,7 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
   const areaRequest = (method: string, path = "", body?: unknown) => send(base.replace(/tasks$/, "areas") + path, method, body);
   const routineRequest = (method: string, path = "", body?: unknown) => send(base.replace(/tasks$/, "routines") + path, method, body);
   return {
+    client, now,
     request, areaRequest, routineRequest, logs, reads, operations, state: () => state, setTime: (time: Date) => { fixedTime = time; },
     taskClockCalls: () => taskClockCalls,
     // Seed pre-versioning journal changes for legacy-history regression tests, not an API write.

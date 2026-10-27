@@ -8,6 +8,8 @@ export const routineSubtaskInputSchema = z.strictObject({
   title: taskFields.title, estimatedDurationMinutes: taskFields.duration,
 });
 const fields = {
+  autoGenerate: z.boolean().default(false),
+  generationHorizonDays: z.number().int().min(1).max(30).default(7),
   title: taskFields.title,
   description: z.string().nullable(),
   priority: z.enum(TaskPriority),
@@ -36,6 +38,8 @@ export const createRoutineSchema = stateObject.extend({
   endCondition: endConditionSchema.default({ type: "NEVER" }),
 }).transform((data) => routineStateSchema.parse(data));
 export const updateRoutineSchema = z.strictObject({
+  autoGenerate: fields.autoGenerate.removeDefault().optional(),
+  generationHorizonDays: fields.generationHorizonDays.removeDefault().optional(),
   title: fields.title.optional(), description: fields.description.optional(), priority: fields.priority.optional(),
   areaId: fields.areaId.optional(), estimatedDurationMinutes: fields.estimatedDurationMinutes.optional(),
   subtasks: fields.subtasks.optional(), timezone: fields.timezone.optional(), startDate: fields.startDate.optional(),

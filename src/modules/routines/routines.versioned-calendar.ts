@@ -5,11 +5,13 @@ import { normalizePreviewHistory } from "./routines.preview-history";
 import { calculateVersionedCandidates, type ScheduleVersion } from "./routines.versions";
 import { reconcileVersionWindows, type StoredVersionOccurrence } from "./routines.version-conflicts";
 import type { ResolvedGenerationOccurrence } from "./routines.generation-resolver";
+import { automaticRange, type AutomaticGeneration } from "./routines.auto-range";
 
 /** Multi-version materialization uses a Routine-wide COUNT budget, reserving every saved execution. */
 export function resolveVersionedCalendar(
   routine: GenerationRoutine, actions: readonly RoutineAction[], versions: readonly ScheduleVersion[],
   stored: readonly StoredVersionOccurrence[], range: GenerationRange, strict: boolean,
+  automatic?: AutomaticGeneration,
 ) {
   if (strict) readGenerationHistory(routine, actions, true);
   if (stored.length > 10_000) generationConflict("Stored occurrence budget exceeded; partial overlap checks are not allowed.");
@@ -17,7 +19,8 @@ export function resolveVersionedCalendar(
   // COUNT is a lifetime cap across all materialized versions, not a new ordinal per version.
   const countPreview = calculateVersionedCandidates(routine, versions.map((version) => version.endCondition.type === "COUNT"
     ? { ...version, endCondition: { type: "NEVER" as const } } : version), range.from, range.to,
-  (version) => normalizePreviewHistory({ ...routine, ...version }, actions, true));
+  (version) => normalizePreviewHistory({ ...routine, ...version }, actions, true),
+  automatic ? (version) => automaticRange(version.timezone, automatic) : undefined);
   if (strict && (countPreview.truncated || countPreview.limitations.some((code) => code !== "CURRENT_CONFIGURATION_PROJECTION"))) {
     generationConflict(`Versioned calendar is incomplete: ${countPreview.limitations.join(", ")}.`);
   }
@@ -26,7 +29,10 @@ export function resolveVersionedCalendar(
   const { accepted, conflicts, retained } = reconcileVersionWindows(candidates, stored, (entry, acceptedCount) =>
     entry.version.endCondition.type !== "COUNT" || stored.length + acceptedCount < entry.version.endCondition.count);
   const resolved: ResolvedGenerationOccurrence[] = stored.filter((entry) => retained.has(entry.id)
-    || (entry.startDate <= range.to && entry.endDate >= range.from)).map((entry) => ({
+    || (() => {
+      const localRange = automatic ? automaticRange(entry.timezone, automatic) : range;
+      return entry.startDate <= localRange.to && entry.endDate >= localRange.from;
+    })()).map((entry) => ({
     existingTaskId: entry.task!.id,
     occurrence: { occurrenceKey: entry.occurrenceKey, startDate: entry.startDate, endDate: entry.endDate,
       timezone: entry.timezone, localTime: entry.localTime, instant: entry.instant?.toISOString() ?? null, diagnostics: [] },

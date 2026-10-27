@@ -11,6 +11,7 @@
     "start": "node dist/server.js",
     "test": "tsx --test tests/*.test.ts",
     "test:typecheck": "tsc --project tsconfig.test.json",
+    "routines:generate:auto": "tsx src/cli/generate-routines.ts",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:migrate:deploy": "prisma migrate deploy"
