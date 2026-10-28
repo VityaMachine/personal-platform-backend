@@ -83,8 +83,3 @@ test("startup pass, injected timer, cancellation, sanitized scan failure", async
   assert.equal((await broken.runOnce()).errors, 1);
   assert.ok(!JSON.stringify(deps.warnings).includes("SECRET PERSON"));
 });
-
-test("importing app does not start runner or connect to database", async () => {
-  const { app } = await import("../src/app");
-  assert.equal(typeof app.listen, "function");
-});

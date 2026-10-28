@@ -4,7 +4,9 @@ import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
-import { app } from "../src/app";
+import { composeApplication } from "../src/application/compose";
+import { readApplicationConfig } from "../src/config/config";
+import { createLogger } from "../src/infrastructure/logging/logger";
 import type { Task, TaskAction, Subtask, Area } from "../src/generated/prisma/client";
 import { calculateTaskSummary, type TaskSummary } from "../src/modules/tasks/domain/tasks.summary";
 
@@ -782,6 +784,11 @@ test("validation retains error JSON and checks ids before PATCH bodies", async (
 });
 
 test("app mounts the module at /api/tasks", async (t) => {
+  const app = composeApplication({
+    config: readApplicationConfig({}),
+    client: () => { throw new Error("Validation must not request Prisma."); },
+    logger: createLogger("production", { write() {} }),
+  }).createHttpApp();
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));

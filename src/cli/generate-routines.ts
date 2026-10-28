@@ -1,11 +1,11 @@
 import "dotenv/config";
 import { disconnectPrisma } from "../infrastructure/database/prisma";
-import { readRunnerConfig } from "../config/config";
-import { createDefaultRoutineRunner } from "../modules/tasks/routines/runner/routines.runner-factory";
+import { readApplicationConfig } from "../config/config";
+import { composeApplication } from "../application/compose";
 
 async function main() {
-  readRunnerConfig(); // Validate configuration; explicit CLI runs even with the timer disabled.
-  const runner = createDefaultRoutineRunner();
+  const config = readApplicationConfig(); // Explicit CLI runs even with the timer disabled.
+  const runner = composeApplication({ config }).createRunner();
   try {
     const result = await runner.runOnce();
     console.log(JSON.stringify(result));

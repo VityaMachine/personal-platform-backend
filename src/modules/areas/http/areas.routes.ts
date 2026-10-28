@@ -1,9 +1,7 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
-import type { PrismaClient } from "../../../generated/prisma/client";
 import { createAreasController } from "./areas.controller";
-import { createAreasRepository } from "../areas.repository";
 import { areaIdSchema, createAreaSchema, deleteAreaSchema, listAreasSchema, updateAreaSchema } from "./areas.schemas";
-import { createAreasService } from "../areas.service";
+import type { AreasService } from "../areas.service";
 
 const route = <Locals extends Record<string, unknown>>(
   handler: (request: Request, response: Response<unknown, Locals>) => Promise<void>,
@@ -30,9 +28,9 @@ const validateDelete: RequestHandler = (request, _response, next) => {
   deleteAreaSchema.parse(request.body);
   next();
 };
-export function createAreasRouter(client?: () => PrismaClient) {
+export function createAreasRouter(service: AreasService) {
   const router = Router();
-  const controller = createAreasController(createAreasService(createAreasRepository(client)));
+  const controller = createAreasController(service);
   router.use(validateQuery);
   router.get("/", route(controller.list));
   router.post("/", validateCreate, route(controller.create));
@@ -40,4 +38,3 @@ export function createAreasRouter(client?: () => PrismaClient) {
   router.delete("/:id", validateId, validateDelete, route(controller.remove));
   return router;
 }
-export const areasRouter = createAreasRouter();

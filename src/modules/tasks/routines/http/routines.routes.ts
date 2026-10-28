@@ -1,9 +1,7 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
-import type { PrismaClient } from "../../../../generated/prisma/client";
 import { createRoutinesController } from "./routines.controller";
-import { createRoutinesRepository } from "../routines.repository";
 import { createRoutineSchema, routineIdSchema, routineQuerySchema, updateRoutineSchema } from "../routines.schemas";
-import { createRoutinesService } from "../routines.service";
+import type { RoutinesService } from "../routines.service";
 import { routinePreviewQuerySchema } from "../routines.preview.schemas";
 import { generateRoutineSchema, generationRangeSchema } from "../routines.generate";
 import { createScheduleVersionSchema } from "../routines.versions";
@@ -23,9 +21,9 @@ const validateCreate: RequestHandler = (request, response, next) => {
 const validateUpdate: RequestHandler = (request, response, next) => {
   response.locals.body = updateRoutineSchema.parse(request.body); next();
 };
-export function createRoutinesRouter(client?: () => PrismaClient, now?: () => Date) {
+export function createRoutinesRouter(service: RoutinesService) {
   const router = Router();
-  const controller = createRoutinesController(createRoutinesService(createRoutinesRepository(client), now));
+  const controller = createRoutinesController(service);
   router.get("/:id/preview", validateId, (request, response, next) => {
     response.locals.query = routinePreviewQuerySchema.parse(request.query); next();
   }, route(controller.preview));
@@ -48,4 +46,3 @@ export function createRoutinesRouter(client?: () => PrismaClient, now?: () => Da
   router.delete("/:id", validateId, route(controller.remove));
   return router;
 }
-export const routinesRouter = createRoutinesRouter();

@@ -5,7 +5,8 @@ import type { AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
 import express from "express";
 
-import { createApp } from "../src/app";
+import { composeApplication } from "../src/application/compose";
+import { readApplicationConfig } from "../src/config/config";
 import { createLogger } from "../src/infrastructure/logging/logger";
 import { ApiError } from "../src/http/api-error";
 import { errorHandler } from "../src/http/middleware/error-handler";
@@ -15,10 +16,11 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 
 function capture() {
   const lines: string[] = [];
-  const middleware = createRequestLogger(createLogger("production", {
+  const logger = createLogger("production", {
     write(line) { lines.push(line); },
-  }));
-  return { middleware, lines, entries: () => lines.map((line) => JSON.parse(line)) };
+  });
+  const middleware = createRequestLogger(logger);
+  return { logger, middleware, lines, entries: () => lines.map((line) => JSON.parse(line)) };
 }
 
 async function listen(t: TestContext, app: express.Express) {
@@ -30,7 +32,11 @@ async function listen(t: TestContext, app: express.Express) {
 
 test("app logs each request once with its response UUID, status and safe metadata", async (t) => {
   const output = capture();
-  const base = await listen(t, createApp(output.middleware));
+  const base = await listen(t, composeApplication({
+    config: readApplicationConfig({}),
+    logger: output.logger,
+    client: () => { throw new Error("Validation must not request Prisma."); },
+  }).createHttpApp());
   const ids = new Set<string>();
   const cases = [
     { path: "/api/health?token=query-secret&password=password-secret", method: "GET", status: 200 },

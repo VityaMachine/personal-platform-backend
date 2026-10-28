@@ -1,10 +1,8 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
 
-import type { PrismaClient } from "../../../generated/prisma/client";
 import { createTasksController } from "./tasks.controller";
-import { createTasksRepository } from "../tasks.repository";
 import { createTaskSchema, listTasksSchema, taskContextQuerySchema, taskIdSchema, updateTaskSchema } from "./tasks.schemas";
-import { createTasksService } from "../tasks.service";
+import type { TasksService } from "../tasks.service";
 import { createSubtasksController } from "./subtasks.controller";
 import { createSubtaskSchema, subtaskIdSchema, updateSubtaskSchema } from "./subtasks.schemas";
 
@@ -47,9 +45,8 @@ const validateSubtaskUpdate: RequestHandler = (request, response, next) => {
   next();
 };
 
-export function createTasksRouter(client?: () => PrismaClient, now?: () => Date) {
+export function createTasksRouter(service: TasksService) {
   const router = Router();
-  const service = createTasksService(createTasksRepository(client), now);
   const controller = createTasksController(service);
   const subtasks = createSubtasksController(service.subtasks);
 
@@ -66,5 +63,3 @@ export function createTasksRouter(client?: () => PrismaClient, now?: () => Date)
 
   return router;
 }
-
-export const tasksRouter = createTasksRouter();

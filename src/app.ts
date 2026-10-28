@@ -1,15 +1,12 @@
 import cors from "cors";
-import express, { type RequestHandler } from "express";
+import express, { type ErrorRequestHandler, type RequestHandler, type Router } from "express";
 
-import { errorHandler } from "./http/middleware/error-handler";
-import { requestLogger } from "./http/middleware/request-logger";
-import { tasksRouter } from "./modules/tasks/http/tasks.routes";
-import { areasRouter } from "./modules/areas/http/areas.routes";
-import { routinesRouter } from "./modules/tasks/routines/http/routines.routes";
-
-const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
-
-export function createApp(httpLogger: RequestHandler = requestLogger) {
+export function createApp({ routers, httpLogger, errorHandler, clientOrigin }: {
+  routers: { tasks: Router; areas: Router; routines: Router };
+  httpLogger: RequestHandler;
+  errorHandler: ErrorRequestHandler;
+  clientOrigin: string;
+}) {
   const app = express();
 
   app.use(httpLogger);
@@ -20,12 +17,10 @@ export function createApp(httpLogger: RequestHandler = requestLogger) {
     response.json({ status: "ok" });
   });
 
-  app.use("/api/tasks", tasksRouter);
-  app.use("/api/areas", areasRouter);
-  app.use("/api/routines", routinesRouter);
+  app.use("/api/tasks", routers.tasks);
+  app.use("/api/areas", routers.areas);
+  app.use("/api/routines", routers.routines);
 
   app.use(errorHandler);
   return app;
 }
-
-export const app = createApp();

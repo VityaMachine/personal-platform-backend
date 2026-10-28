@@ -11,3 +11,13 @@ export function readRunnerConfig(environment: NodeJS.ProcessEnv = process.env) {
   return { enabled: parsed.data.ROUTINE_AUTO_GENERATION_ENABLED === "true",
     intervalMs: parsed.data.ROUTINE_AUTO_GENERATION_INTERVAL_MS };
 }
+
+export function readApplicationConfig(environment: NodeJS.ProcessEnv = process.env) {
+  return {
+    port: Number(environment.PORT) || 4000,
+    clientOrigin: environment.CLIENT_ORIGIN ?? "http://localhost:3000",
+    runner: readRunnerConfig(environment),
+  };
+}
+
+export type ApplicationConfig = ReturnType<typeof readApplicationConfig>;

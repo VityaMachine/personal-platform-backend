@@ -1,17 +1,17 @@
 import "dotenv/config";
 
-import { app } from "./app";
-import { readRunnerConfig } from "./config/config";
+import { composeApplication } from "./application/compose";
+import { readApplicationConfig } from "./config/config";
 import { disconnectPrisma } from "./infrastructure/database/prisma";
-import { createDefaultRoutineRunner } from "./modules/tasks/routines/runner/routines.runner-factory";
 
-const port = Number(process.env.PORT) || 4000;
-
-const config = readRunnerConfig();
-const runner = createDefaultRoutineRunner();
+const config = readApplicationConfig();
+const port = config.port;
+const composition = composeApplication({ config });
+const app = composition.createHttpApp();
+const runner = composition.createRunner();
 const server = app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
-  if (config.enabled) runner.start(config.intervalMs);
+  if (config.runner.enabled) runner.start(config.runner.intervalMs);
 });
 
 let shuttingDown = false;

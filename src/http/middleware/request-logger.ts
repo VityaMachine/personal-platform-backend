@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import type { Logger } from "pino";
 import pinoHttp from "pino-http";
-import { createLogger } from "../../infrastructure/logging/logger";
 
 export function createRequestLogger(logger: Logger) {
   // Allowlist fields: raw req/res and exceptions can contain secrets.
@@ -36,5 +35,3 @@ export function createRequestLogger(logger: Logger) {
       `${request.method} ${(request.originalUrl || request.url).split("?")[0]} ${response.statusCode} requestId=${request.id}`,
   });
 }
-
-export const requestLogger = createRequestLogger(createLogger());

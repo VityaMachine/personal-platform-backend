@@ -50,11 +50,41 @@ HTTP routes/controllers, а також цілісні HTTP schemas і DTO mapper
 Вони не позначені як чисті domain-модулі.
 
 Предметні locks розташовані у власників: `areas/area-lock.ts`,
-`tasks/task-lock.ts`, `tasks/routines/routine-lock.ts`. Runner і його factory —
+`tasks/task-lock.ts`, `tasks/routines/routine-lock.ts`. Runner розташований
 у `tasks/routines/runner/`. Вкладення Routines у Tasks не змінює HTTP-шлях
-`/api/routines`; композиція routes/services і транзакції залишаються чинними.
+`/api/routines`; власники транзакцій, locks і retry залишаються чинними.
 Сервер запускається через `src/server.ts`, а CLI генерації — через
 `src/cli/generate-routines.ts`.
+
+### Композиція та запуск
+
+`src/application/compose.ts` експортує `composeApplication({ config, client?,
+now?, logger? })`. Він один раз складає repositories/services зі спільним
+лінивим Prisma provider, clock і logger та повертає дві factory:
+
+- `createHttpApp()` складає routers і HTTP middleware та повертає Express app;
+- `createRunner()` окремо створює runner з тим самим Routines service/repository,
+  logger і clock, без запуску проходу або таймера.
+
+Конфігурацію читає `readApplicationConfig()` у `src/config/config.ts`;
+назви env і defaults збережені. `readRunnerConfig()` залишається окремим
+контрактом перевірки runner config. `server.ts` застосовує enabled/interval,
+а CLI явно виконує `runOnce()` навіть при вимкненому періодичному runner.
+CLI не створює HTTP app. Колишню `routines.runner-factory.ts` замінено цією
+композицією; готових default app/router/logger instances більше немає.
+
+`src/app.ts` експортує лише `createApp({ routers, httpLogger, errorHandler,
+clientOrigin })`: Express, middleware та незмінні `/api/health`, `/api/tasks`,
+`/api/areas`, `/api/routines`. Routes отримують готові services. Для складання
+використовуються наявні вузькі factory exports repositories/services/routes
+та `createRoutineRunner`; додаткових barrel exports або DI container немає.
+
+Імпорт `app.ts` не створює app, logger, Prisma client, runner, таймери чи signal
+handlers і не читає env. Runtime `dotenv/config` завантажується першим у
+`server.ts` та CLI; `prisma.config.ts` лишається окремим незмінним entrypoint
+Prisma CLI. HTTP app не запускає listen або runner. Сервер зберігає immediate
+pass після listen та порядок shutdown: закрити приймання HTTP, stop runner,
+дочекатися закриття HTTP, disconnect Prisma. CLI зберігає exit code та cleanup.
 
 ## Prisma та міграції
 

@@ -5,14 +5,12 @@ import { readFile, readdir } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { test } from "node:test";
-import express from "express";
 import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "../src/generated/prisma/client";
-import { createRoutinesRouter } from "../src/modules/tasks/routines/http/routines.routes";
-import { createTasksRouter } from "../src/modules/tasks/http/tasks.routes";
-import { createAreasRouter } from "../src/modules/areas/http/areas.routes";
-import { errorHandler } from "../src/http/middleware/error-handler";
+import { composeApplication } from "../src/application/compose";
+import { readApplicationConfig } from "../src/config/config";
+import { createLogger } from "../src/infrastructure/logging/logger";
 import { isRoutineOccurrenceUniqueConflict, createRoutinesRepository } from "../src/modules/tasks/routines/routines.repository";
 import { createRoutinesService } from "../src/modules/tasks/routines/routines.service";
 import { createRoutineRunner } from "../src/modules/tasks/routines/runner/routines.runner";
@@ -108,11 +106,10 @@ test("local PostgreSQL: additive migration, unique/FK constraints, atomic rollba
     'UPDATE "RoutineOccurrence" SET "basisType" = \'SKIPPED\' WHERE "id" = $1',
     'UPDATE "RoutineOccurrence" SET "basisCompletedAt" = "basisAt" + interval \'1 second\' WHERE "id" = $1',
   ]) await assert.rejects(sql.query(invalid, [legacySuccessorId]), (error: { code?: string }) => error.code === "23514");
-  const app = express(); app.use(express.json());
-  app.use("/api/routines", createRoutinesRouter(() => prisma));
-  app.use("/api/tasks", createTasksRouter(() => prisma));
-  app.use("/api/areas", createAreasRouter(() => prisma));
-  app.use(errorHandler);
+  const app = composeApplication({
+    config: readApplicationConfig({}), client: () => prisma,
+    logger: createLogger("production", { write() {} }),
+  }).createHttpApp();
   const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;

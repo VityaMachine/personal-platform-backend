@@ -3,15 +3,11 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import type { TestContext } from "node:test";
-import express from "express";
 
 import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, type Area, type Routine, type RoutineSubtask, type RoutineAction, type RoutineOccurrence, type RoutineScheduleVersion } from "../../src/generated/prisma/client";
-import { errorHandler } from "../../src/http/middleware/error-handler";
-import { createRequestLogger } from "../../src/http/middleware/request-logger";
+import { composeApplication } from "../../src/application/compose";
+import { readApplicationConfig } from "../../src/config/config";
 import { createLogger } from "../../src/infrastructure/logging/logger";
-import { createTasksRouter } from "../../src/modules/tasks/http/tasks.routes";
-import { createAreasRouter } from "../../src/modules/areas/http/areas.routes";
-import { createRoutinesRouter } from "../../src/modules/tasks/routines/http/routines.routes";
 
 export const input = {
   title: "Write the proposal",
@@ -378,14 +374,13 @@ export async function fixture(t: TestContext, initialSubtaskIds: string[] = []) 
       return result;
     },
   } as unknown as PrismaClient;
-  const app = express();
   const logs: string[] = [];
-  app.use(createRequestLogger(createLogger("production", { write(line) { logs.push(line); } })));
-  app.use(express.json());
-  app.use("/api/tasks", createTasksRouter(() => client, () => { taskClockCalls++; return now(); }));
-  app.use("/api/areas", createAreasRouter(() => client));
-  app.use("/api/routines", createRoutinesRouter(() => client, now));
-  app.use(errorHandler);
+  const app = composeApplication({
+    config: readApplicationConfig({}),
+    client: () => client,
+    now: () => { taskClockCalls++; return now(); },
+    logger: createLogger("production", { write(line) { logs.push(line); } }),
+  }).createHttpApp();
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
