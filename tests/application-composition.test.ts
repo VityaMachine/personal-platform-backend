@@ -78,8 +78,14 @@ test("composition shares provider, services, clock and logger; HTTP does not con
     const clock = () => instant;
     const logger = {};
     const services = {}, repositories = {}, routers = {};
+    const deleteArea = async () => {};
+    const detachAreaLinks = async () => {};
     let runnerCalls = 0, appOptions;
     const replacements = {
+      '/application/delete-area.ts': { createDeleteArea(repository, detach) {
+        assert.equal(repository, repositories.areas); assert.equal(detach, detachAreaLinks); return deleteArea;
+      } },
+      '/tasks/area-links.ts': { detachAreaLinks },
       '/app.ts': { createApp(options) { appOptions = options; return 'HTTP'; } },
       '/http/middleware/request-logger.ts': { createRequestLogger(value) { assert.equal(value, logger); return 'HTTP logger'; } },
       '/runner/routines.runner.ts': { createRoutineRunner(dependencies) {
@@ -101,8 +107,10 @@ test("composition shares provider, services, clock and logger; HTTP does not con
         if (name !== 'areas') assert.equal(now, clock);
         return services[name] = {};
       } };
-      replacements['/' + singular + '.routes.ts'] = { ['create' + factory + 'Router'](service) {
-        assert.equal(service, services[name]); return routers[name] = {};
+      replacements['/' + singular + '.routes.ts'] = { ['create' + factory + 'Router'](service, remove) {
+        assert.equal(service, services[name]);
+        if (name === 'areas') assert.equal(remove, deleteArea);
+        return routers[name] = {};
       } };
     }
     Module._load = function(request, parent, main) {

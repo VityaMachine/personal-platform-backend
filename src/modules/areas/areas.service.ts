@@ -1,7 +1,6 @@
 import { ApiError } from "../../http/api-error";
 import { AreasTransactionConflictError, type AreasRepository, type AreasTransactionRepository } from "./areas.repository";
 import type { CreateAreaInput, UpdateAreaInput } from "./http/areas.schemas";
-import { toRoutineResponse } from "../tasks/routines/routines.mapper";
 
 export function createAreasService(repository: AreasRepository) {
   async function transaction<T>(work: (tx: AreasTransactionRepository) => Promise<T>): Promise<T> {
@@ -24,24 +23,6 @@ export function createAreasService(repository: AreasRepository) {
         const before = await tx.findForUpdate(id);
         if (!before) throw new ApiError(404, "Area not found.");
         return tx.update(id, { name: input.name });
-      });
-    },
-    remove(id: string) {
-      return transaction(async (tx) => {
-        const area = await tx.findForUpdate(id);
-        if (!area) throw new ApiError(404, "Area not found.");
-        const tasks = await tx.findLinkedTasks(id);
-        for (const task of tasks) {
-          await tx.clearTaskArea(task.id);
-          await tx.createAreaChanged(task.id, area);
-        }
-        const routines = await tx.routines.findLinked(id);
-        for (const routine of routines) {
-          const before = toRoutineResponse(routine);
-          const after = toRoutineResponse(await tx.routines.update(routine.id, { areaId: null }));
-          await tx.routines.createAction(routine.id, "UPDATED", { before, after });
-        }
-        await tx.remove(id);
       });
     },
   };

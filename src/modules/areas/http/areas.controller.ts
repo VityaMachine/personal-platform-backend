@@ -4,7 +4,7 @@ import type { CreateAreaInput, UpdateAreaInput } from "./areas.schemas";
 import type { AreasService } from "../areas.service";
 
 type AreaResponse<Locals extends Record<string, unknown>> = Response<unknown, Locals>;
-export function createAreasController(service: AreasService) {
+export function createAreasController(service: AreasService, deleteArea: (id: string) => Promise<void>) {
   return {
     async list(_request: Request, response: Response) {
       response.json((await service.list()).map(toAreaResponse));
@@ -16,7 +16,7 @@ export function createAreasController(service: AreasService) {
       response.json(toAreaResponse(await service.update(response.locals.id, response.locals.body)));
     },
     async remove(_request: Request, response: AreaResponse<{ id: string }>) {
-      await service.remove(response.locals.id);
+      await deleteArea(response.locals.id);
       response.status(204).end();
     },
   };

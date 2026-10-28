@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { PrismaClient } from "../generated/prisma/client";
 import { createApp } from "../app";
+import { createDeleteArea } from "./delete-area";
 import type { ApplicationConfig } from "../config/config";
 import { getPrisma } from "../infrastructure/database/prisma";
 import { createLogger } from "../infrastructure/logging/logger";
@@ -11,6 +12,7 @@ import { createAreasService } from "../modules/areas/areas.service";
 import { createAreasRouter } from "../modules/areas/http/areas.routes";
 import { createTasksRepository } from "../modules/tasks/tasks.repository";
 import { createTasksService } from "../modules/tasks/tasks.service";
+import { detachAreaLinks } from "../modules/tasks/area-links";
 import { createTasksRouter } from "../modules/tasks/http/tasks.routes";
 import { createRoutinesRepository } from "../modules/tasks/routines/routines.repository";
 import { createRoutinesService } from "../modules/tasks/routines/routines.service";
@@ -24,7 +26,9 @@ export function composeApplication({ config, client = getPrisma, now = () => new
   logger?: Logger;
 }) {
   const tasks = createTasksService(createTasksRepository(client), now);
-  const areas = createAreasService(createAreasRepository(client));
+  const areasRepository = createAreasRepository(client);
+  const areas = createAreasService(areasRepository);
+  const deleteArea = createDeleteArea(areasRepository, detachAreaLinks);
   const routinesRepository = createRoutinesRepository(client);
   const routines = createRoutinesService(routinesRepository, now);
 
@@ -33,7 +37,7 @@ export function composeApplication({ config, client = getPrisma, now = () => new
       return createApp({
         routers: {
           tasks: createTasksRouter(tasks),
-          areas: createAreasRouter(areas),
+          areas: createAreasRouter(areas, deleteArea),
           routines: createRoutinesRouter(routines),
         },
         httpLogger: createRequestLogger(logger),

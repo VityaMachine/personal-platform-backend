@@ -86,6 +86,38 @@ Prisma CLI. HTTP app не запускає listen або runner. Сервер з
 pass після listen та порядок shutdown: закрити приймання HTTP, stop runner,
 дочекатися закриття HTTP, disconnect Prisma. CLI зберігає exit code та cleanup.
 
+### Атомарне видалення Area
+
+`src/application/delete-area.ts` експортує `createDeleteArea(repository,
+detachAreaLinks)`. Координатор визначає межі однієї зовнішньої транзакції;
+`compose.ts` передає готову операцію через Areas router у controller.
+Areas service більше не виконує відв'язування. Areas service/repository
+не імпортують Tasks, Routines або їхні mappers; repository зберігає власні
+Area CRUD, lock та фізичне видалення.
+
+Чинний `AreasRepository.transaction` виконує Serializable transaction
+і передає callback власні Area queries та той самий Prisma transaction client
+другим аргументом. Retry залишається тут без узагальнення: лише `P2034`,
+максимум три спроби, без нового timeout. Координатор зберігає `404 Area not
+found.` та фінальну `409 Area changed concurrently. Retry the request.`;
+успішний DELETE повертає `204`.
+
+`src/modules/tasks/area-links.ts` володіє відв'язуванням і журналами Tasks
+та внутрішніх Routines. Він отримує готовий transaction client і заблоковану
+Area; власних транзакцій, retry або нових locks не відкриває. Послідовність
+збережена: Area lock → читання Tasks за id ASC → для кожної Task update та
+AREA_CHANGED → читання Routines за id ASC → для кожної Routine update та
+UPDATED із before/after → фізичне видалення Area. Запропонований інший
+порядок блокувань не впроваджено.
+
+Обробляються також archived/soft-deleted зв'язки; updatedAt і формати журналів
+збережені. Occurrences, версії, статуси, діти та історичні snapshots не
+переписуються. Помилка журналу відкочує весь сценарій; retry повторює його
+повністю без дублювання подій. `tests/delete-area.test.ts` перевіряє точні
+журнали, повну послідовність queries та ідентичність transaction client,
+rollback і retries через підставний Prisma. Ця модель не доводить реальну
+поведінку PostgreSQL row locks, deadlocks або FK під конкурентним навантаженням.
+
 ## Prisma та міграції
 
 Використано [Prisma Config](https://www.prisma.io/docs/orm/v7/reference/prisma-config-reference),

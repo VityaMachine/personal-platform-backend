@@ -28,9 +28,9 @@ const validateDelete: RequestHandler = (request, _response, next) => {
   deleteAreaSchema.parse(request.body);
   next();
 };
-export function createAreasRouter(service: AreasService) {
+export function createAreasRouter(service: AreasService, deleteArea: (id: string) => Promise<void>) {
   const router = Router();
-  const controller = createAreasController(service);
+  const controller = createAreasController(service, deleteArea);
   router.use(validateQuery);
   router.get("/", route(controller.list));
   router.post("/", validateCreate, route(controller.create));
