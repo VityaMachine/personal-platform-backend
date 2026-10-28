@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import type { RoutineAction } from "../../generated/prisma/client";
+import type { RoutineAction } from "../../../generated/prisma/client";
 import { routineActionMetadataSchema, toRoutineActionResponse } from "./routines.mapper";
 import type { PauseInterval, PreviewRoutine } from "./routines.preview";
 

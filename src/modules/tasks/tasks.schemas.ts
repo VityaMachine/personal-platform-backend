@@ -4,7 +4,7 @@ import { TaskPriority, TaskStatus } from "../../generated/prisma/client";
 import { ApiError } from "../../http/api-error";
 import { sumSubtaskDurations, taskFields } from "./tasks.fields";
 import { initialSubtaskSchema } from "./subtasks.schemas";
-import { timezoneSchema } from "../routines/routines.schedule";
+import { timezoneSchema } from "./routines/routines.schedule";
 
 const { title, duration, note } = taskFields;
 const dateTime = z.iso.datetime({ offset: true }).transform((value) => new Date(value));

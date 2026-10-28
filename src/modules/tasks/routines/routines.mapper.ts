@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { TaskPriority, type RoutineAction } from "../../generated/prisma/client";
-import { taskFields } from "../tasks/tasks.fields";
+import { TaskPriority, type RoutineAction } from "../../../generated/prisma/client";
+import { taskFields } from "../tasks.fields";
 import type { RoutineWithRelations } from "./routines.repository";
 import { routineStateSchema, routineSubtaskInputSchema } from "./routines.schemas";
 import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./routines.schedule";

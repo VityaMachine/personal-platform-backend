@@ -1,5 +1,5 @@
-import type { RoutineAction } from "../../generated/prisma/client";
-import { COMPLETION_HISTORY_BUDGET, verifiedTaskCompletion } from "../tasks/tasks.completion";
+import type { RoutineAction } from "../../../generated/prisma/client";
+import { COMPLETION_HISTORY_BUDGET, verifiedTaskCompletion } from "../tasks.completion";
 import { completionCalendarDate } from "./routines.completion-calendar";
 import { calculateRoutinePreview } from "./routines.preview";
 import { generationConflict, readGenerationHistory, type GenerationRange, type GenerationRoutine } from "./routines.generate";

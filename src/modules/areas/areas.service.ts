@@ -1,7 +1,7 @@
 import { ApiError } from "../../http/api-error";
 import { AreasTransactionConflictError, type AreasRepository, type AreasTransactionRepository } from "./areas.repository";
 import type { CreateAreaInput, UpdateAreaInput } from "./areas.schemas";
-import { toRoutineResponse } from "../routines/routines.mapper";
+import { toRoutineResponse } from "../tasks/routines/routines.mapper";
 
 export function createAreasService(repository: AreasRepository) {
   async function transaction<T>(work: (tx: AreasTransactionRepository) => Promise<T>): Promise<T> {

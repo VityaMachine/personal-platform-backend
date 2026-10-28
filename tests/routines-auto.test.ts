@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fixture } from "./helpers/api-fixture";
-import { createRoutinesRepository } from "../src/modules/routines/routines.repository";
-import { createRoutinesService } from "../src/modules/routines/routines.service";
-import { automaticRange, currentAutomaticRange } from "../src/modules/routines/routines.auto-range";
-import { parseScheduleVersions } from "../src/modules/routines/routines.versions";
+import { createRoutinesRepository } from "../src/modules/tasks/routines/routines.repository";
+import { createRoutinesService } from "../src/modules/tasks/routines/routines.service";
+import { automaticRange, currentAutomaticRange } from "../src/modules/tasks/routines/routines.auto-range";
+import { parseScheduleVersions } from "../src/modules/tasks/routines/routines.versions";
 
 const input = { title: "Automatic test", estimatedDurationMinutes: 10, timezone: "Europe/Kyiv", startDate: "2026-10-01",
   schedule: { version: 1, recurrence: { type: "DAILY", intervalDays: 1 } } };

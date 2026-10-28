@@ -11,7 +11,7 @@ import { createRequestLogger } from "../../src/http/middleware/request-logger";
 import { createLogger } from "../../src/infrastructure/logging/logger";
 import { createTasksRouter } from "../../src/modules/tasks/tasks.routes";
 import { createAreasRouter } from "../../src/modules/areas/areas.routes";
-import { createRoutinesRouter } from "../../src/modules/routines/routines.routes";
+import { createRoutinesRouter } from "../../src/modules/tasks/routines/routines.routes";
 
 export const input = {
   title: "Write the proposal",

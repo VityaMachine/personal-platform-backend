@@ -1,4 +1,4 @@
-import type { RoutineAction } from "../../generated/prisma/client";
+import type { RoutineAction } from "../../../generated/prisma/client";
 import type { GenerationRange, GenerationRoutine } from "./routines.generate";
 import { readGenerationHistory, generationConflict } from "./routines.generate";
 import { normalizePreviewHistory } from "./routines.preview-history";

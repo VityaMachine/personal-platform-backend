@@ -5,7 +5,7 @@ import { errorHandler } from "./http/middleware/error-handler";
 import { requestLogger } from "./http/middleware/request-logger";
 import { tasksRouter } from "./modules/tasks/tasks.routes";
 import { areasRouter } from "./modules/areas/areas.routes";
-import { routinesRouter } from "./modules/routines/routines.routes";
+import { routinesRouter } from "./modules/tasks/routines/routines.routes";
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRoutineRunner } from "../src/modules/routines/routines.runner";
-import type { RoutinesService } from "../src/modules/routines/routines.service";
+import { createRoutineRunner } from "../src/modules/tasks/routines/routines.runner";
+import type { RoutinesService } from "../src/modules/tasks/routines/routines.service";
 import { readRunnerConfig } from "../src/config/config";
 import { ApiError } from "../src/http/api-error";
 

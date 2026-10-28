@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { calculateRoutinePreview, type PreviewOptions, type PreviewRoutine } from "../src/modules/routines/routines.preview";
-import { scheduleSchema } from "../src/modules/routines/routines.schedule";
+import { calculateRoutinePreview, type PreviewOptions, type PreviewRoutine } from "../src/modules/tasks/routines/routines.preview";
+import { scheduleSchema } from "../src/modules/tasks/routines/routines.schedule";
 import { fixture } from "./helpers/api-fixture";
 
 const input = { title: "Масаж", timezone: "Europe/Kyiv", startDate: "2026-10-25", estimatedDurationMinutes: 30,

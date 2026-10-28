@@ -1,8 +1,8 @@
-import { Prisma, type PrismaClient, type RoutineActionType } from "../../generated/prisma/client";
-import { getPrisma } from "../../infrastructure/database/prisma";
-import { lockArea } from "../../lib/area-lock";
-import { lockRoutine } from "../../lib/routine-lock";
-import { createTaskQueries } from "../tasks/tasks.repository";
+import { Prisma, type PrismaClient, type RoutineActionType } from "../../../generated/prisma/client";
+import { getPrisma } from "../../../infrastructure/database/prisma";
+import { lockArea } from "../../../lib/area-lock";
+import { lockRoutine } from "../../../lib/routine-lock";
+import { createTaskQueries } from "../tasks.repository";
 
 const routineInclude = {
   area: { select: { id: true, name: true } },

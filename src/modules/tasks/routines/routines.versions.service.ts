@@ -1,4 +1,4 @@
-import { ApiError } from "../../http/api-error";
+import { ApiError } from "../../../http/api-error";
 import type { RoutinesTransactionRepository } from "./routines.repository";
 import { toRoutineResponse } from "./routines.mapper";
 import { calendarVersionSchema, parseScheduleVersions, versionMidnight, VERSION_BUDGET, versionConflict,

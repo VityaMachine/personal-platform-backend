@@ -27,6 +27,18 @@ Direct connection потребує IPv6 або Supabase IPv4 add-on; для IPv4
 session pooler URL у `DIRECT_URL`. Transaction pooler на порту 6543 не використовуйте
 для міграцій. `.env` і його локальні варіанти ігноруються Git; у `.env.example` лише шаблони.
 
+## Структура backend
+
+`src/modules/tasks/` містить задачі, підзадачі, Today, Backlog, Archive,
+історію та summary. Внутрішній каталог `src/modules/tasks/routines/` містить
+Routines, розклади, версії, preview, planning, генерацію та runner.
+Areas розташований окремо в `src/modules/areas/`.
+
+Вкладення Routines у Tasks не змінює HTTP-шлях `/api/routines`.
+Композиція routes/services і транзакції залишаються чинними; предметні locks
+поки розташовані в `src/lib/`. Сервер запускається через `src/server.ts`,
+а CLI генерації — через `src/cli/generate-routines.ts`.
+
 ## Prisma та міграції
 
 Використано [Prisma Config](https://www.prisma.io/docs/orm/v7/reference/prisma-config-reference),
@@ -736,7 +748,7 @@ COUNT означає виконання розкладу, а не кількіс
 окремим рядком локальної дати, а розклад і завершення — як перевірені JSON;
 дані не конвертуються наперед у UTC timestamps. Календарні дні не означають
 `N × 24 години`. Календарний розрахунок винесений у чистий модуль
-`src/modules/routines/routines.preview.ts`: валідовані Routine, from/to, limit,
+`src/modules/tasks/routines/routines.preview.ts`: валідовані Routine, from/to, limit,
 нормалізовані паузи й необов'язковий контекст завершення є явними входами.
 Прихованого поточного часу, I/O або генерації Task в ньому немає.
 `@js-temporal/polyfill` забезпечує календарну арифметику та перевірку локального

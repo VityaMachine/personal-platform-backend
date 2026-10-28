@@ -1,5 +1,5 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
-import type { PrismaClient } from "../../generated/prisma/client";
+import type { PrismaClient } from "../../../generated/prisma/client";
 import { createRoutinesController } from "./routines.controller";
 import { createRoutinesRepository } from "./routines.repository";
 import { createRoutineSchema, routineIdSchema, routineQuerySchema, updateRoutineSchema } from "./routines.schemas";

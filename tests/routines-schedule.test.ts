@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { clipLocalDateWindow, endConditionSchema, localDateSchema, monthlySelectionSchema, monthlyWindow,
-  scheduleSchema, timezoneSchema, weeklySelectionSchema, weeklyWindows } from "../src/modules/routines/routines.schedule";
+  scheduleSchema, timezoneSchema, weeklySelectionSchema, weeklyWindows } from "../src/modules/tasks/routines/routines.schedule";
 
 const recurrences = [
   { type: "DAILY", intervalDays: 2 },
