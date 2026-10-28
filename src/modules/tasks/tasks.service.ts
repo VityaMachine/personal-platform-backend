@@ -1,5 +1,5 @@
 import type { Task } from "../../generated/prisma/client";
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 import {
   TasksTransactionConflictError,
   type TaskWithSubtasks,

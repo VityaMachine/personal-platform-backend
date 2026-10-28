@@ -12,7 +12,7 @@ import { Prisma, PrismaClient } from "../src/generated/prisma/client";
 import { createRoutinesRouter } from "../src/modules/routines/routines.routes";
 import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
 import { createAreasRouter } from "../src/modules/areas/areas.routes";
-import { errorHandler } from "../src/middleware/error-handler";
+import { errorHandler } from "../src/http/middleware/error-handler";
 import { isRoutineOccurrenceUniqueConflict, createRoutinesRepository } from "../src/modules/routines/routines.repository";
 import { createRoutinesService } from "../src/modules/routines/routines.service";
 import { createRoutineRunner } from "../src/modules/routines/routines.runner";

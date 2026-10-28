@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { TaskPriority, TaskStatus } from "../../generated/prisma/client";
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 import { sumSubtaskDurations, taskFields } from "./tasks.fields";
 import { initialSubtaskSchema } from "./subtasks.schemas";
 import { timezoneSchema } from "../routines/routines.schedule";

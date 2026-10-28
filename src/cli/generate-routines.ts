@@ -1,6 +1,6 @@
 import "dotenv/config";
-import { disconnectPrisma } from "../lib/prisma";
-import { readRunnerConfig } from "../config";
+import { disconnectPrisma } from "../infrastructure/database/prisma";
+import { readRunnerConfig } from "../config/config";
 import { createDefaultRoutineRunner } from "../modules/routines/routines.runner-factory";
 
 async function main() {

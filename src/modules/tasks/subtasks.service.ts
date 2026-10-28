@@ -1,5 +1,5 @@
 import type { Subtask, Task } from "../../generated/prisma/client";
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 import type { TasksTransactionRepository } from "./tasks.repository";
 import type { CreateSubtaskInput, UpdateSubtaskInput } from "./subtasks.schemas";
 import { sumSubtaskDurations } from "./tasks.fields";

@@ -6,10 +6,10 @@ import { test, type TestContext } from "node:test";
 import express from "express";
 
 import { createApp } from "../src/app";
-import { createLogger } from "../src/lib/logger";
-import { ApiError } from "../src/lib/api-error";
-import { errorHandler } from "../src/middleware/error-handler";
-import { createRequestLogger } from "../src/middleware/request-logger";
+import { createLogger } from "../src/infrastructure/logging/logger";
+import { ApiError } from "../src/http/api-error";
+import { errorHandler } from "../src/http/middleware/error-handler";
+import { createRequestLogger } from "../src/http/middleware/request-logger";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -124,7 +124,7 @@ test("500 and API errors omit exception details and response bodies and emit one
 test("development prints colored timestamp, PID, HTTP summary and details; production prints JSON", () => {
   for (const environment of ["development", "production"]) {
     const result = spawnSync(process.execPath, ["--import", "tsx", "-e", `
-      const { createLogger } = require('./src/lib/logger.ts');
+      const { createLogger } = require('./src/infrastructure/logging/logger.ts');
       const logger = createLogger(${JSON.stringify(environment)});
       logger.info({requestId:'sample-id',method:'GET',path:'/api/health',statusCode:200,durationMs:12,remoteAddress:'127.0.0.1'}, 'completed');
     `], { encoding: "utf8", timeout: 15_000 });

@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 import type { RoutinesRepository } from "./routines.repository";
 import type { RoutinesService } from "./routines.service";
 

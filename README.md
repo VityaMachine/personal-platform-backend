@@ -33,7 +33,7 @@ session pooler URL у `DIRECT_URL`. Transaction pooler на порту 6543 не
 генератор `prisma-client` з CommonJS і `@prisma/adapter-pg`.
 Налаштування підключення описані в [документації Supabase](https://supabase.com/docs/guides/database/prisma).
 Prisma CLI читає `DIRECT_URL` з `prisma.config.ts`; клієнт читає `DATABASE_URL`
-через ліниву функцію `getPrisma()` у `src/lib/prisma.ts`.
+через ліниву функцію `getPrisma()` у `src/infrastructure/database/prisma.ts`.
 
 Модель `Task` зберігає статус, пріоритет, планування, причину скасування та незалежні
 `archivedAt` / `deletedAt`. `TaskAction` зберігає журнал із UUID, `taskId`, `type`,

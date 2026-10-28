@@ -1,8 +1,8 @@
 import cors from "cors";
 import express, { type RequestHandler } from "express";
 
-import { errorHandler } from "./middleware/error-handler";
-import { requestLogger } from "./middleware/request-logger";
+import { errorHandler } from "./http/middleware/error-handler";
+import { requestLogger } from "./http/middleware/request-logger";
 import { tasksRouter } from "./modules/tasks/tasks.routes";
 import { areasRouter } from "./modules/areas/areas.routes";
 import { routinesRouter } from "./modules/routines/routines.routes";

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 import { taskFields } from "./tasks.fields";
 
 const fields = {

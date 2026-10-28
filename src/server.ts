@@ -1,8 +1,8 @@
 import "dotenv/config";
 
 import { app } from "./app";
-import { readRunnerConfig } from "./config";
-import { disconnectPrisma } from "./lib/prisma";
+import { readRunnerConfig } from "./config/config";
+import { disconnectPrisma } from "./infrastructure/database/prisma";
 import { createDefaultRoutineRunner } from "./modules/routines/routines.runner-factory";
 
 const port = Number(process.env.PORT) || 4000;

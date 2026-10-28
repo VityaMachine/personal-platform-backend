@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import type { Logger } from "pino";
 import pinoHttp from "pino-http";
-import { createLogger } from "../lib/logger";
+import { createLogger } from "../../infrastructure/logging/logger";
 
 export function createRequestLogger(logger: Logger) {
   // Allowlist fields: raw req/res and exceptions can contain secrets.

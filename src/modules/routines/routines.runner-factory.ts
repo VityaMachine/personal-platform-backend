@@ -1,4 +1,4 @@
-import { createLogger } from "../../lib/logger";
+import { createLogger } from "../../infrastructure/logging/logger";
 import { createRoutinesRepository } from "./routines.repository";
 import { createRoutinesService } from "./routines.service";
 import { createRoutineRunner } from "./routines.runner";

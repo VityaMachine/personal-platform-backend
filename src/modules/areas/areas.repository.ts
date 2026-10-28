@@ -1,5 +1,5 @@
 import { Prisma, type Area, type PrismaClient } from "../../generated/prisma/client";
-import { getPrisma } from "../../lib/prisma";
+import { getPrisma } from "../../infrastructure/database/prisma";
 import { lockArea } from "../../lib/area-lock";
 import { createRoutineQueries } from "../routines/routines.repository";
 

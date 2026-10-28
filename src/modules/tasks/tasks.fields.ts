@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 
 export const taskFields = {
   title: z.string().trim().min(1).max(160),

@@ -1,4 +1,4 @@
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 import { AreasTransactionConflictError, type AreasRepository, type AreasTransactionRepository } from "./areas.repository";
 import type { CreateAreaInput, UpdateAreaInput } from "./areas.schemas";
 import { toRoutineResponse } from "../routines/routines.mapper";

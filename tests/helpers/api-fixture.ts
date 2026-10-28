@@ -6,9 +6,9 @@ import type { TestContext } from "node:test";
 import express from "express";
 
 import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, type Area, type Routine, type RoutineSubtask, type RoutineAction, type RoutineOccurrence, type RoutineScheduleVersion } from "../../src/generated/prisma/client";
-import { errorHandler } from "../../src/middleware/error-handler";
-import { createRequestLogger } from "../../src/middleware/request-logger";
-import { createLogger } from "../../src/lib/logger";
+import { errorHandler } from "../../src/http/middleware/error-handler";
+import { createRequestLogger } from "../../src/http/middleware/request-logger";
+import { createLogger } from "../../src/infrastructure/logging/logger";
 import { createTasksRouter } from "../../src/modules/tasks/tasks.routes";
 import { createAreasRouter } from "../../src/modules/areas/areas.routes";
 import { createRoutinesRouter } from "../../src/modules/routines/routines.routes";

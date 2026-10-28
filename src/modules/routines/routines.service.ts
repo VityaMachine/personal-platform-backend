@@ -1,4 +1,4 @@
-import { ApiError } from "../../lib/api-error";
+import { ApiError } from "../../http/api-error";
 import { toRoutineActionResponse, toRoutineResponse } from "./routines.mapper";
 import { RoutinesTransactionConflictError, type RoutinesRepository, type RoutinesTransactionRepository } from "./routines.repository";
 import { routineStateSchema, type CreateRoutineInput, type UpdateRoutineInput, type RoutineState } from "./routines.schemas";
