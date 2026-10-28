@@ -1,4 +1,4 @@
-import type { Task } from "../../generated/prisma/client";
+import type { Task } from "../../../generated/prisma/client";
 import { analyzeTaskHistory, isTerminalStatus, workingStatuses, type SummaryAction, type WorkingStatus } from "./tasks.history";
 export type { SummaryAction } from "./tasks.history";
 

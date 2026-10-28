@@ -2,8 +2,8 @@ import type { Request, Response } from "express";
 
 import { toTaskResponse } from "./tasks.mapper";
 import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./tasks.schemas";
-import type { TasksService } from "./tasks.service";
-import type { TaskTodayContext } from "./tasks.today";
+import type { TasksService } from "../tasks.service";
+import type { TaskTodayContext } from "../domain/tasks.today";
 
 type TaskResponse<Locals extends Record<string, unknown>> = Response<unknown, Locals>;
 

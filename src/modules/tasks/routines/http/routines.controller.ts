@@ -1,9 +1,9 @@
 import type { Request, Response } from "express";
-import type { CreateRoutineInput, UpdateRoutineInput } from "./routines.schemas";
-import type { RoutinesService } from "./routines.service";
-import type { RoutinePreviewQuery } from "./routines.preview.schemas";
-import type { GenerateRoutineInput, GenerationRange } from "./routines.generate";
-import type { CreateScheduleVersionInput } from "./routines.versions";
+import type { CreateRoutineInput, UpdateRoutineInput } from "../routines.schemas";
+import type { RoutinesService } from "../routines.service";
+import type { RoutinePreviewQuery } from "../routines.preview.schemas";
+import type { GenerateRoutineInput, GenerationRange } from "../routines.generate";
+import type { CreateScheduleVersionInput } from "../routines.versions";
 
 type RoutineResponse<Locals extends Record<string, unknown>> = Response<unknown, Locals>;
 export function createRoutinesController(service: RoutinesService) {

@@ -2,7 +2,7 @@ import { ApiError } from "../../../http/api-error";
 import { toRoutineActionResponse, toRoutineResponse } from "./routines.mapper";
 import { RoutinesTransactionConflictError, type RoutinesRepository, type RoutinesTransactionRepository } from "./routines.repository";
 import { routineStateSchema, type CreateRoutineInput, type UpdateRoutineInput, type RoutineState } from "./routines.schemas";
-import { calculateRoutinePreview } from "./routines.preview";
+import { calculateRoutinePreview } from "./domain/routines.preview";
 import { normalizePreviewHistory, PREVIEW_HISTORY_BUDGET } from "./routines.preview-history";
 import type { RoutinePreviewQuery } from "./routines.preview.schemas";
 import { calendarConfiguration, generationConflict, type GenerateRoutineInput, type GenerationRange } from "./routines.generate";
@@ -12,7 +12,7 @@ import { resolveRoutineGeneration, validateGenerationPlanning } from "./routines
 import { appendScheduleVersion } from "./routines.versions.service";
 import { calendarSnapshot, parseScheduleVersions, resolveCompletionVersion, validateScheduleVersionHistory, versionMidnight, versionedKey,
   type CreateScheduleVersionInput } from "./routines.versions";
-import { currentAutomaticRange } from "./routines.auto-range";
+import { currentAutomaticRange } from "./domain/routines.auto-range";
 import { resolveVersionedCalendar } from "./routines.versioned-calendar";
 
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);

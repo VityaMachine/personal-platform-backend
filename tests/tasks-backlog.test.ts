@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isTaskBacklog, type TaskBacklogInput } from "../src/modules/tasks/tasks.backlog";
-import { isTaskToday, DEFAULT_TODAY_CONTEXT } from "../src/modules/tasks/tasks.today";
+import { isTaskBacklog, type TaskBacklogInput } from "../src/modules/tasks/domain/tasks.backlog";
+import { isTaskToday, DEFAULT_TODAY_CONTEXT } from "../src/modules/tasks/domain/tasks.today";
 import { fixture } from "./helpers/api-fixture";
 
 const now = new Date("2026-10-25T12:00:00Z");

@@ -9,13 +9,13 @@ import express from "express";
 import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "../src/generated/prisma/client";
-import { createRoutinesRouter } from "../src/modules/tasks/routines/routines.routes";
-import { createTasksRouter } from "../src/modules/tasks/tasks.routes";
-import { createAreasRouter } from "../src/modules/areas/areas.routes";
+import { createRoutinesRouter } from "../src/modules/tasks/routines/http/routines.routes";
+import { createTasksRouter } from "../src/modules/tasks/http/tasks.routes";
+import { createAreasRouter } from "../src/modules/areas/http/areas.routes";
 import { errorHandler } from "../src/http/middleware/error-handler";
 import { isRoutineOccurrenceUniqueConflict, createRoutinesRepository } from "../src/modules/tasks/routines/routines.repository";
 import { createRoutinesService } from "../src/modules/tasks/routines/routines.service";
-import { createRoutineRunner } from "../src/modules/tasks/routines/routines.runner";
+import { createRoutineRunner } from "../src/modules/tasks/routines/runner/routines.runner";
 import { Temporal } from "@js-temporal/polyfill";
 
 // Opt-in only. All migrations, including old data-changing migrations, run in a NEW isolated schema.

@@ -1,7 +1,7 @@
 import { Temporal } from "@js-temporal/polyfill";
 import type { RoutineAction } from "../../../generated/prisma/client";
 import { routineActionMetadataSchema, toRoutineActionResponse } from "./routines.mapper";
-import type { PauseInterval, PreviewRoutine } from "./routines.preview";
+import type { PauseInterval, PreviewRoutine } from "./domain/routines.preview";
 
 export const PREVIEW_HISTORY_BUDGET = 10_000;
 

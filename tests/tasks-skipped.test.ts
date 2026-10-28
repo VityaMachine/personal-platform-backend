@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { fixture } from "./helpers/api-fixture";
-import { verifiedTaskCompletion } from "../src/modules/tasks/tasks.completion";
+import { verifiedTaskCompletion } from "../src/modules/tasks/domain/tasks.completion";
 
 const input = { title: "Routine execution", estimatedDurationMinutes: 15, timezone: "Europe/Kyiv", startDate: "2026-10-23",
   schedule: { version: 1, recurrence: { type: "AFTER_COMPLETION", intervalDays: 2 }, localTime: "09:00" } };

@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import type { Task, RoutineOccurrence } from "../../generated/prisma/client";
+import type { Task, RoutineOccurrence } from "../../../generated/prisma/client";
 import { daysSinceOccurrenceEnd, taskLocalDate } from "./tasks.calendar";
 
 export type TaskTodayContext = { timezone: string; overdueMode: "none" | "limited" | "all"; overdueDays: number };

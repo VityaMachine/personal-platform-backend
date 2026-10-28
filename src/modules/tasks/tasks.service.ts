@@ -6,14 +6,14 @@ import {
   type TasksRepository,
   type TasksTransactionRepository,
 } from "./tasks.repository";
-import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./tasks.schemas";
+import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./http/tasks.schemas";
 import { createSubtasksService } from "./subtasks.service";
-import { calculateTaskSummary } from "./tasks.summary";
-import { toAreaSnapshot } from "../areas/areas.mapper";
+import { calculateTaskSummary } from "./domain/tasks.summary";
+import { toAreaSnapshot } from "../areas/http/areas.mapper";
 import { createTaskWithSubtasks } from "./tasks.creation";
-import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext } from "./tasks.today";
-import { verifiedTaskCompletion } from "./tasks.completion";
-import { isTaskBacklog } from "./tasks.backlog";
+import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext } from "./domain/tasks.today";
+import { verifiedTaskCompletion } from "./domain/tasks.completion";
+import { isTaskBacklog } from "./domain/tasks.backlog";
 
 export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
   async function assignableArea(id: string | null | undefined, tx: TasksTransactionRepository) {

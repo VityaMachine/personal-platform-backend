@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import { toAreaResponse } from "./areas.mapper";
 import type { CreateAreaInput, UpdateAreaInput } from "./areas.schemas";
-import type { AreasService } from "./areas.service";
+import type { AreasService } from "../areas.service";
 
 type AreaResponse<Locals extends Record<string, unknown>> = Response<unknown, Locals>;
 export function createAreasController(service: AreasService) {

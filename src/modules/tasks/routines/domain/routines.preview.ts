@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { clipLocalDateWindow, monthlyWindow, weeklyWindows, type RoutineEndCondition, type RoutineSchedule } from "./routines.schedule";
-import { completionPreviewContextSchema, type CompletionPreviewContext } from "./routines.preview.schemas";
+import { completionPreviewContextSchema, type CompletionPreviewContext } from "../routines.preview.schemas";
 import { completionCalendarDate } from "./routines.completion-calendar";
 
 export const PREVIEW_PERIOD_BUDGET = 10_000;

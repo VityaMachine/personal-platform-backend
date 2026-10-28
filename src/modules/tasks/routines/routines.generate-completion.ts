@@ -1,7 +1,7 @@
 import type { RoutineAction } from "../../../generated/prisma/client";
-import { COMPLETION_HISTORY_BUDGET, verifiedTaskCompletion } from "../tasks.completion";
-import { completionCalendarDate } from "./routines.completion-calendar";
-import { calculateRoutinePreview } from "./routines.preview";
+import { COMPLETION_HISTORY_BUDGET, verifiedTaskCompletion } from "../domain/tasks.completion";
+import { completionCalendarDate } from "./domain/routines.completion-calendar";
+import { calculateRoutinePreview } from "./domain/routines.preview";
 import { generationConflict, readGenerationHistory, type GenerationRange, type GenerationRoutine } from "./routines.generate";
 import type { RoutinesTransactionRepository } from "./routines.repository";
 import type { ResolvedGenerationOccurrence } from "./routines.generation-resolver";

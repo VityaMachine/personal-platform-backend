@@ -3,9 +3,9 @@ import type { GenerationRange, GenerationRoutine } from "./routines.generate";
 import { readGenerationHistory, generationConflict } from "./routines.generate";
 import { normalizePreviewHistory } from "./routines.preview-history";
 import { calculateVersionedCandidates, type ScheduleVersion } from "./routines.versions";
-import { reconcileVersionWindows, type StoredVersionOccurrence } from "./routines.version-conflicts";
+import { reconcileVersionWindows, type StoredVersionOccurrence } from "./domain/routines.version-conflicts";
 import type { ResolvedGenerationOccurrence } from "./routines.generation-resolver";
-import { automaticRange, type AutomaticGeneration } from "./routines.auto-range";
+import { automaticRange, type AutomaticGeneration } from "./domain/routines.auto-range";
 
 /** Multi-version materialization uses a Routine-wide COUNT budget, reserving every saved execution. */
 export function resolveVersionedCalendar(

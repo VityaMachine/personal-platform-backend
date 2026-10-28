@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fixture } from "./helpers/api-fixture";
-import { verifiedTaskCompletion } from "../src/modules/tasks/tasks.completion";
+import { verifiedTaskCompletion } from "../src/modules/tasks/domain/tasks.completion";
 
 const input = { title: "Замінити фільтр", estimatedDurationMinutes: 15, timezone: "Europe/Kyiv", startDate: "2026-10-25",
   schedule: { version: 1, recurrence: { type: "AFTER_COMPLETION", intervalDays: 2 }, localTime: null } };

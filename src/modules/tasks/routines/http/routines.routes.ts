@@ -1,12 +1,12 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
-import type { PrismaClient } from "../../../generated/prisma/client";
+import type { PrismaClient } from "../../../../generated/prisma/client";
 import { createRoutinesController } from "./routines.controller";
-import { createRoutinesRepository } from "./routines.repository";
-import { createRoutineSchema, routineIdSchema, routineQuerySchema, updateRoutineSchema } from "./routines.schemas";
-import { createRoutinesService } from "./routines.service";
-import { routinePreviewQuerySchema } from "./routines.preview.schemas";
-import { generateRoutineSchema, generationRangeSchema } from "./routines.generate";
-import { createScheduleVersionSchema } from "./routines.versions";
+import { createRoutinesRepository } from "../routines.repository";
+import { createRoutineSchema, routineIdSchema, routineQuerySchema, updateRoutineSchema } from "../routines.schemas";
+import { createRoutinesService } from "../routines.service";
+import { routinePreviewQuerySchema } from "../routines.preview.schemas";
+import { generateRoutineSchema, generationRangeSchema } from "../routines.generate";
+import { createScheduleVersionSchema } from "../routines.versions";
 
 const route = <Locals extends Record<string, unknown>>(
   handler: (request: Request, response: Response<unknown, Locals>) => Promise<void>,

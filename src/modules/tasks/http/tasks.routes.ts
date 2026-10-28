@@ -1,10 +1,10 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
 
-import type { PrismaClient } from "../../generated/prisma/client";
+import type { PrismaClient } from "../../../generated/prisma/client";
 import { createTasksController } from "./tasks.controller";
-import { createTasksRepository } from "./tasks.repository";
+import { createTasksRepository } from "../tasks.repository";
 import { createTaskSchema, listTasksSchema, taskContextQuerySchema, taskIdSchema, updateTaskSchema } from "./tasks.schemas";
-import { createTasksService } from "./tasks.service";
+import { createTasksService } from "../tasks.service";
 import { createSubtasksController } from "./subtasks.controller";
 import { createSubtaskSchema, subtaskIdSchema, updateSubtaskSchema } from "./subtasks.schemas";
 

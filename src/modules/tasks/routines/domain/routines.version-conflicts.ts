@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import type { PreviewOccurrence } from "./routines.preview";
-import { versionMidnight, type VersionedOccurrence } from "./routines.versions";
+import { versionMidnight, type VersionedOccurrence } from "../routines.versions";
 
 type Window = Pick<PreviewOccurrence, "startDate" | "endDate" | "timezone">;
 export type StoredVersionOccurrence = Window & { id: string; occurrenceKey: string; scheduleVersionId: string;

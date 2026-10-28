@@ -34,10 +34,27 @@ session pooler URL у `DIRECT_URL`. Transaction pooler на порту 6543 не
 Routines, розклади, версії, preview, planning, генерацію та runner.
 Areas розташований окремо в `src/modules/areas/`.
 
-Вкладення Routines у Tasks не змінює HTTP-шлях `/api/routines`.
-Композиція routes/services і транзакції залишаються чинними; предметні locks
-поки розташовані в `src/lib/`. Сервер запускається через `src/server.ts`,
-а CLI генерації — через `src/cli/generate-routines.ts`.
+HTTP routes/controllers, а також цілісні HTTP schemas і DTO mappers згруповані
+в `http/` відповідного власника. Чисті обчислення Tasks розташовані в
+`tasks/domain/`, календарні helpers Routines — у `tasks/routines/domain/`.
+Це групування файлів, а не нові межі залежностей: preview досі використовує
+спільну completion-context schema зі змішаного `routines.preview.schemas.ts`,
+а version-conflicts — календарний helper зі змішаного `routines.versions.ts`.
+
+Змішані файли залишено на рівні власника без поділу: `tasks.fields.ts`
+(схеми полів і сума тривалостей з ApiError), `tasks.creation.ts`
+(транзакційне створення), `routines.schemas.ts`, `routines.preview.schemas.ts`
+(HTTP та спільна валідація), `routines.mapper.ts` (DTO і перевірка стану/історії),
+`routines.preview-history.ts` (історія через цей mapper), `routines.generate.ts`,
+`routines.versions.ts`, `routines.versioned-calendar.ts`, resolver-и та services.
+Вони не позначені як чисті domain-модулі.
+
+Предметні locks розташовані у власників: `areas/area-lock.ts`,
+`tasks/task-lock.ts`, `tasks/routines/routine-lock.ts`. Runner і його factory —
+у `tasks/routines/runner/`. Вкладення Routines у Tasks не змінює HTTP-шлях
+`/api/routines`; композиція routes/services і транзакції залишаються чинними.
+Сервер запускається через `src/server.ts`, а CLI генерації — через
+`src/cli/generate-routines.ts`.
 
 ## Prisma та міграції
 
@@ -748,7 +765,7 @@ COUNT означає виконання розкладу, а не кількіс
 окремим рядком локальної дати, а розклад і завершення — як перевірені JSON;
 дані не конвертуються наперед у UTC timestamps. Календарні дні не означають
 `N × 24 години`. Календарний розрахунок винесений у чистий модуль
-`src/modules/tasks/routines/routines.preview.ts`: валідовані Routine, from/to, limit,
+`src/modules/tasks/routines/domain/routines.preview.ts`: валідовані Routine, from/to, limit,
 нормалізовані паузи й необов'язковий контекст завершення є явними входами.
 Прихованого поточного часу, I/O або генерації Task в ньому немає.
 `@js-temporal/polyfill` забезпечує календарну арифметику та перевірку локального

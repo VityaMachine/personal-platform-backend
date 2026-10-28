@@ -9,9 +9,9 @@ import { Prisma, type PrismaClient, type Task, type TaskAction, type Subtask, ty
 import { errorHandler } from "../../src/http/middleware/error-handler";
 import { createRequestLogger } from "../../src/http/middleware/request-logger";
 import { createLogger } from "../../src/infrastructure/logging/logger";
-import { createTasksRouter } from "../../src/modules/tasks/tasks.routes";
-import { createAreasRouter } from "../../src/modules/areas/areas.routes";
-import { createRoutinesRouter } from "../../src/modules/tasks/routines/routines.routes";
+import { createTasksRouter } from "../../src/modules/tasks/http/tasks.routes";
+import { createAreasRouter } from "../../src/modules/areas/http/areas.routes";
+import { createRoutinesRouter } from "../../src/modules/tasks/routines/http/routines.routes";
 
 export const input = {
   title: "Write the proposal",

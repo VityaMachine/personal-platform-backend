@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import type { RoutineOccurrence, Task } from "../../generated/prisma/client";
+import type { RoutineOccurrence, Task } from "../../../generated/prisma/client";
 import { daysSinceOccurrenceEnd } from "./tasks.calendar";
 
 export type TaskBacklogInput = Pick<Task, "status" | "archivedAt" | "deletedAt" | "plannedAt" | "dueAt"> & {

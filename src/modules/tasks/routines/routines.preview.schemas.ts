@@ -1,6 +1,6 @@
 import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
-import { localDateSchema } from "./routines.schedule";
+import { localDateSchema } from "./domain/routines.schedule";
 
 export const completionPreviewContextSchema = z.strictObject({
   completedAt: z.iso.datetime({ offset: true }).refine((value) => {

@@ -1,4 +1,4 @@
-import type { Task, TaskAction, TaskStatus } from "../../generated/prisma/client";
+import type { Task, TaskAction, TaskStatus } from "../../../generated/prisma/client";
 
 export const COMPLETION_HISTORY_BUDGET = 10_000;
 export const workingStatuses = ["TODO", "IN_PROGRESS", "PAUSED", "POSTPONED"] as const;

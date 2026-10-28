@@ -3,9 +3,9 @@ import express, { type RequestHandler } from "express";
 
 import { errorHandler } from "./http/middleware/error-handler";
 import { requestLogger } from "./http/middleware/request-logger";
-import { tasksRouter } from "./modules/tasks/tasks.routes";
-import { areasRouter } from "./modules/areas/areas.routes";
-import { routinesRouter } from "./modules/tasks/routines/routines.routes";
+import { tasksRouter } from "./modules/tasks/http/tasks.routes";
+import { areasRouter } from "./modules/areas/http/areas.routes";
+import { routinesRouter } from "./modules/tasks/routines/http/routines.routes";
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
 

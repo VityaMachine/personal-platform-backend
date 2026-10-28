@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import type { TasksService } from "./tasks.service";
+import type { TasksService } from "../tasks.service";
 import type { CreateSubtaskInput, UpdateSubtaskInput } from "./subtasks.schemas";
 
 type SubtaskResponse<Body = unknown> = Response<unknown, { id: string; subtaskId: string; body: Body }>;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext, type TaskTodayInput } from "../src/modules/tasks/tasks.today";
+import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext, type TaskTodayInput } from "../src/modules/tasks/domain/tasks.today";
 import { fixture } from "./helpers/api-fixture";
 
 const now = new Date("2026-10-25T12:00:00Z");

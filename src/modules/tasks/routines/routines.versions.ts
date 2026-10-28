@@ -2,8 +2,8 @@ import { Temporal } from "@js-temporal/polyfill";
 import { z } from "zod";
 import type { RoutineScheduleVersion, RoutineAction } from "../../../generated/prisma/client";
 import { ApiError } from "../../../http/api-error";
-import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./routines.schedule";
-import { calculateRoutinePreview, type PreviewOccurrence, type PreviewOptions, type PreviewRoutine } from "./routines.preview";
+import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./domain/routines.schedule";
+import { calculateRoutinePreview, type PreviewOccurrence, type PreviewOptions, type PreviewRoutine } from "./domain/routines.preview";
 import type { CompletionPreviewContext } from "./routines.preview.schemas";
 import { routineActionMetadataSchema } from "./routines.mapper";
 

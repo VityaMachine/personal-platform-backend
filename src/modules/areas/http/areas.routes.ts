@@ -1,9 +1,9 @@
 import { Router, type Request, type RequestHandler, type Response } from "express";
-import type { PrismaClient } from "../../generated/prisma/client";
+import type { PrismaClient } from "../../../generated/prisma/client";
 import { createAreasController } from "./areas.controller";
-import { createAreasRepository } from "./areas.repository";
+import { createAreasRepository } from "../areas.repository";
 import { areaIdSchema, createAreaSchema, deleteAreaSchema, listAreasSchema, updateAreaSchema } from "./areas.schemas";
-import { createAreasService } from "./areas.service";
+import { createAreasService } from "../areas.service";
 
 const route = <Locals extends Record<string, unknown>>(
   handler: (request: Request, response: Response<unknown, Locals>) => Promise<void>,

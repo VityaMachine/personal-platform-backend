@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { app } from "../src/app";
 import type { Task, TaskAction, Subtask, Area } from "../src/generated/prisma/client";
-import { calculateTaskSummary, type TaskSummary } from "../src/modules/tasks/tasks.summary";
+import { calculateTaskSummary, type TaskSummary } from "../src/modules/tasks/domain/tasks.summary";
 
 import { fixture, input } from "./helpers/api-fixture";
 

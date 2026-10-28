@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApiError } from "../../http/api-error";
+import { ApiError } from "../../../http/api-error";
 
 const name = z.string().trim().min(1).max(80);
 export const createAreaSchema = z.strictObject({ name });

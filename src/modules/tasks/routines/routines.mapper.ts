@@ -3,7 +3,7 @@ import { TaskPriority, type RoutineAction } from "../../../generated/prisma/clie
 import { taskFields } from "../tasks.fields";
 import type { RoutineWithRelations } from "./routines.repository";
 import { routineStateSchema, routineSubtaskInputSchema } from "./routines.schemas";
-import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./routines.schedule";
+import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./domain/routines.schedule";
 
 const snapshotSchema = z.strictObject({
   autoGenerate: z.boolean().optional(),

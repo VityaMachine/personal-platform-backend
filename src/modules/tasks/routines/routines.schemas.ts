@@ -2,7 +2,7 @@ import { z } from "zod";
 import { TaskPriority } from "../../../generated/prisma/client";
 import { ApiError } from "../../../http/api-error";
 import { sumSubtaskDurations, taskFields } from "../tasks.fields";
-import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./routines.schedule";
+import { endConditionSchema, localDateSchema, scheduleSchema, timezoneSchema } from "./domain/routines.schedule";
 
 export const routineSubtaskInputSchema = z.strictObject({
   title: taskFields.title, estimatedDurationMinutes: taskFields.duration,

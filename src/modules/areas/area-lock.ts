@@ -1,4 +1,4 @@
-import { Prisma, type Area } from "../generated/prisma/client";
+import { Prisma, type Area } from "../../generated/prisma/client";
 
 // Assignment, deletion and rename lock the same row before any Task writes.
 // Under Serializable, a stale snapshot raises P2034 and the entire transaction

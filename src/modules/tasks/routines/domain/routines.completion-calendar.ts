@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import type { CompletionPreviewContext } from "./routines.preview.schemas";
+import type { CompletionPreviewContext } from "../routines.preview.schemas";
 
 /** Shared pure arithmetic for preview simulations and persisted completion-based generation. */
 export function completionCalendarDate(

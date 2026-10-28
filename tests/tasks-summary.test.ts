@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TaskStatus } from "../src/generated/prisma/client";
-import { calculateTaskSummary, type SummaryAction } from "../src/modules/tasks/tasks.summary";
+import { calculateTaskSummary, type SummaryAction } from "../src/modules/tasks/domain/tasks.summary";
 
 const at = (seconds: number) => new Date(Date.parse("2026-10-22T00:00:00Z") + seconds * 1000);
 const created = (initial: TaskStatus = "TODO"): SummaryAction => ({

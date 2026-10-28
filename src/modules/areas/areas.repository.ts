@@ -1,6 +1,6 @@
 import { Prisma, type Area, type PrismaClient } from "../../generated/prisma/client";
 import { getPrisma } from "../../infrastructure/database/prisma";
-import { lockArea } from "../../lib/area-lock";
+import { lockArea } from "./area-lock";
 import { createRoutineQueries } from "../tasks/routines/routines.repository";
 
 function createAreaQueries(db: Prisma.TransactionClient) {

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { fixture } from "./helpers/api-fixture";
 import { createRoutinesRepository } from "../src/modules/tasks/routines/routines.repository";
 import { createRoutinesService } from "../src/modules/tasks/routines/routines.service";
-import { automaticRange, currentAutomaticRange } from "../src/modules/tasks/routines/routines.auto-range";
+import { automaticRange, currentAutomaticRange } from "../src/modules/tasks/routines/domain/routines.auto-range";
 import { parseScheduleVersions } from "../src/modules/tasks/routines/routines.versions";
 
 const input = { title: "Automatic test", estimatedDurationMinutes: 10, timezone: "Europe/Kyiv", startDate: "2026-10-01",

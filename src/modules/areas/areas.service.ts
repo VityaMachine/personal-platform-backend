@@ -1,6 +1,6 @@
 import { ApiError } from "../../http/api-error";
 import { AreasTransactionConflictError, type AreasRepository, type AreasTransactionRepository } from "./areas.repository";
-import type { CreateAreaInput, UpdateAreaInput } from "./areas.schemas";
+import type { CreateAreaInput, UpdateAreaInput } from "./http/areas.schemas";
 import { toRoutineResponse } from "../tasks/routines/routines.mapper";
 
 export function createAreasService(repository: AreasRepository) {

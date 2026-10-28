@@ -4,7 +4,7 @@ import { ApiError } from "../../../http/api-error";
 import type { RoutineAction } from "../../../generated/prisma/client";
 import { routineActionMetadataSchema, type toRoutineResponse } from "./routines.mapper";
 import { normalizePreviewHistory, PREVIEW_HISTORY_BUDGET } from "./routines.preview-history";
-import { calculateRoutinePreview } from "./routines.preview";
+import { calculateRoutinePreview } from "./domain/routines.preview";
 import { routinePreviewQuerySchema } from "./routines.preview.schemas";
 
 export const MAX_NEW_ROUTINE_TASKS = 100;

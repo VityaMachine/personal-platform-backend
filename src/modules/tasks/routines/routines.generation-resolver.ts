@@ -2,12 +2,12 @@ import { ApiError } from "../../../http/api-error";
 import type { RoutineAction } from "../../../generated/prisma/client";
 import { MAX_NEW_ROUTINE_TASKS, generationConflict, planRoutineGeneration, type GenerationRange, type GenerationRoutine, type GenerateRoutineInput } from "./routines.generate";
 import { resolveCompletionGeneration, type CompletionChainFields } from "./routines.generate-completion";
-import type { PreviewOccurrence } from "./routines.preview";
+import type { PreviewOccurrence } from "./domain/routines.preview";
 import type { RoutinesTransactionRepository } from "./routines.repository";
 import { parseScheduleVersions, validateScheduleVersionHistory, type ScheduleVersion } from "./routines.versions";
 import { resolveVersionedCalendar } from "./routines.versioned-calendar";
-import type { WindowConflict } from "./routines.version-conflicts";
-import type { AutomaticGeneration } from "./routines.auto-range";
+import type { WindowConflict } from "./domain/routines.version-conflicts";
+import type { AutomaticGeneration } from "./domain/routines.auto-range";
 
 export type ResolvedGenerationOccurrence = {
   occurrence: PreviewOccurrence;

@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import type { ScheduleVersion } from "./routines.versions";
+import type { ScheduleVersion } from "../routines.versions";
 
 export type AutomaticGeneration = { asOf: Date; horizonDays: number };
 

@@ -1,4 +1,4 @@
-import type { Task } from "../../generated/prisma/client";
+import type { Task } from "../../../generated/prisma/client";
 import { analyzeTaskHistory, type SummaryAction } from "./tasks.history";
 export { COMPLETION_HISTORY_BUDGET } from "./tasks.history";
 

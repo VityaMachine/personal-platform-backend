@@ -1,7 +1,7 @@
 import type { Subtask, Task } from "../../generated/prisma/client";
 import { ApiError } from "../../http/api-error";
 import type { TasksTransactionRepository } from "./tasks.repository";
-import type { CreateSubtaskInput, UpdateSubtaskInput } from "./subtasks.schemas";
+import type { CreateSubtaskInput, UpdateSubtaskInput } from "./http/subtasks.schemas";
 import { sumSubtaskDurations } from "./tasks.fields";
 
 type Transaction = TasksTransactionRepository;
