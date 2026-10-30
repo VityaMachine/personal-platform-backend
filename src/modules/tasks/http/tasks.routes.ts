@@ -5,6 +5,7 @@ import { createTaskSchema, listTasksSchema, taskContextQuerySchema, taskIdSchema
 import type { TasksService } from "../tasks.service";
 import { createSubtasksController } from "./subtasks.controller";
 import { createSubtaskSchema, subtaskIdSchema, updateSubtaskSchema } from "./subtasks.schemas";
+import { searchTasksSchema } from "./tasks.search.schemas";
 
 const route = <Locals extends Record<string, unknown>>(
   handler: (request: Request, response: Response<unknown, Locals>) => Promise<void>,
@@ -51,6 +52,10 @@ export function createTasksRouter(service: TasksService) {
   const subtasks = createSubtasksController(service.subtasks);
 
   router.get("/", validateList, route(controller.list));
+  router.get("/search", (request, response, next) => {
+    response.locals.query = searchTasksSchema.parse(request.query);
+    next();
+  }, route(controller.search));
   router.post("/", validateContext, validateCreate, route(controller.create));
   router.get("/:id/subtasks", validateId, route(subtasks.list));
   router.post("/:id/subtasks", validateId, validateSubtaskCreate, route(subtasks.create));

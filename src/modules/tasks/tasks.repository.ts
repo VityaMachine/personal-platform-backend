@@ -2,6 +2,10 @@ import { Prisma, type PrismaClient, type TaskActionType } from "../../generated/
 import { getPrisma } from "../../infrastructure/database/prisma";
 import { lockArea } from "../areas/area-lock";
 import { lockTask } from "./task-lock";
+import { searchNeedsCompletion, searchNeedsPlanning, searchWindowBounds, searchWindowKey,
+  taskSearchCreationDatesSql, taskSearchWindowsSql, taskSearchSql, type SearchWindow, type TaskSearchSelection } from "./tasks.search";
+import type { SearchTasksInput } from "./http/tasks.search.schemas";
+import { creationSnapshotTime } from "./domain/tasks.history";
 
 const taskInclude = {
   area: { select: { id: true, name: true } },
@@ -17,6 +21,14 @@ export type TaskWithSubtasks = Prisma.TaskGetPayload<{ include: typeof taskInclu
 
 export function createTaskQueries(db: Prisma.TransactionClient) {
   return {
+    async search(query: SearchTasksInput, asOf: Date) {
+      const dates = searchNeedsCompletion(query) ? await db.$queryRaw<{ value: string }[]>(taskSearchCreationDatesSql) : [];
+      const creationTimes = JSON.stringify(Object.fromEntries(dates.map(({ value }) => [value, creationSnapshotTime(value)])));
+      const windows = searchNeedsPlanning(query) ? await db.$queryRaw<SearchWindow[]>(taskSearchWindowsSql) : [];
+      const calendar = JSON.stringify(Object.fromEntries(windows.map((window) => [searchWindowKey(window), searchWindowBounds(window)])));
+      const [selection] = await db.$queryRaw<TaskSearchSelection[]>(taskSearchSql(query, asOf, creationTimes, calendar));
+      return selection;
+    },
     lock(id: string) { return lockTask(db, id); },
     findCompletionActions(taskId: string, take: number) {
       return db.taskAction.findMany({ where: { taskId, type: { in: ["CREATED", "STATUS_CHANGED"] } },

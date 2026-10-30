@@ -1,4 +1,4 @@
-import type { Task } from "../../generated/prisma/client";
+import { TaskStatus, type Task } from "../../generated/prisma/client";
 import { ApiError } from "../../http/api-error";
 import {
   TasksTransactionConflictError,
@@ -14,6 +14,7 @@ import { createTaskWithSubtasks } from "./tasks.creation";
 import { DEFAULT_TODAY_CONTEXT, isTaskToday, type TaskTodayContext } from "./domain/tasks.today";
 import { verifiedTaskCompletion } from "./domain/tasks.completion";
 import { isTaskBacklog } from "./domain/tasks.backlog";
+import type { SearchTasksInput } from "./http/tasks.search.schemas";
 
 export function createTasksService(repository: TasksRepository, now: () => Date = () => new Date()) {
   async function assignableArea(id: string | null | undefined, tx: TasksTransactionRepository) {
@@ -32,10 +33,10 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
     }
     return { tasks, grouped };
   }
-  function present(snapshot: Awaited<ReturnType<typeof summarize>>, context: Readonly<TaskTodayContext>) {
-    // One instant after the successful commit, also when the transaction needed retries.
+  function present(snapshot: Awaited<ReturnType<typeof summarize>>, context: Readonly<TaskTodayContext>, instant?: Date) {
+    // Legacy reads capture time after commit; search supplies its single request instant.
     // Summary and calendar selection have independent rules over the same consistent snapshot.
-    const asOf = now();
+    const asOf = instant ?? now();
     return snapshot.tasks.map((task) => {
       const actions = snapshot.grouped.get(task.id) ?? [];
       const outcome = task.status === "DONE" || task.status === "SKIPPED" ? verifiedTaskCompletion(task, actions, asOf) : null;
@@ -67,6 +68,25 @@ export function createTasksService(repository: TasksRepository, now: () => Date 
 
   return {
     subtasks: createSubtasksService({ findTask, transaction }),
+    async search(query: SearchTasksInput) {
+      const asOf = now();
+      const { selection, snapshot } = await transaction(async (tx) => {
+        const selection = await tx.search(query, asOf);
+        const tasks = selection.ids.length ? await tx.findMany({ id: { in: selection.ids } }) : [];
+        const byId = new Map(tasks.map((task) => [task.id, task]));
+        return { selection, snapshot: await summarize(selection.ids.map((id) => byId.get(id)!), tx) };
+      });
+      const counts = Object.fromEntries(Object.values(TaskStatus).map((status) => [status, selection.counts[status] ?? 0]));
+      const totalPages = Math.ceil(selection.total / query.pageSize);
+      return {
+        items: present(snapshot, { ...DEFAULT_TODAY_CONTEXT, timezone: query.timezone }, asOf),
+        page: query.page, pageSize: query.pageSize, totalItems: selection.total, totalPages,
+        hasPreviousPage: selection.total > 0 && query.page > 1,
+        hasNextPage: query.page < totalPages,
+        summary: { totalItems: Object.values(counts).reduce((sum, count) => sum + count, 0), counts },
+        asOf: asOf.toISOString(),
+      };
+    },
     async list(query: ListTasksInput) {
       const snapshot = await transaction(async (tx) => summarize(await tx.findMany({
         deletedAt: null,

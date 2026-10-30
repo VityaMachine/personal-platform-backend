@@ -9,6 +9,8 @@ const record = (value: unknown): Record<string, unknown> => value !== null && ty
   ? value as Record<string, unknown> : {};
 const status = (value: unknown): TaskStatus | undefined => typeof value === "string" && statuses.includes(value) ? value as TaskStatus : undefined;
 export const isTerminalStatus = (value: TaskStatus | undefined) => value === "DONE" || value === "CANCELED" || value === "SKIPPED";
+// Keep legacy Date.parse semantics for creation evidence, including offset/legacy strings.
+export const creationSnapshotTime = (value: unknown): number => typeof value === "string" ? Date.parse(value) : NaN;
 
 /** One replay for summary intervals and verified outcome instants.
  * Summary retains its historical diagnostics; outcome evidence additionally requires identity,
@@ -30,7 +32,7 @@ export function analyzeTaskHistory(
   if (creations.length === 1 && task.id !== undefined) {
     const metadata = record(creations[0].metadata), snapshot = record(metadata.after);
     if (metadata.before !== null || snapshot.id !== task.id || typeof snapshot.createdAt !== "string"
-      || Date.parse(snapshot.createdAt) !== start) evidenceIssues.add("INVALID_CREATION_SNAPSHOT");
+      || creationSnapshotTime(snapshot.createdAt) !== start) evidenceIssues.add("INVALID_CREATION_SNAPSHOT");
   }
   let current = initial, cursor = start;
   let terminalEntry = isTerminalStatus(initial) ? start : undefined;

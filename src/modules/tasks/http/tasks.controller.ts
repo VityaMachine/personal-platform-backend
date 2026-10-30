@@ -4,11 +4,16 @@ import { toTaskResponse } from "./tasks.mapper";
 import type { CreateTaskInput, ListTasksInput, UpdateTaskInput } from "./tasks.schemas";
 import type { TasksService } from "../tasks.service";
 import type { TaskTodayContext } from "../domain/tasks.today";
+import type { SearchTasksInput } from "./tasks.search.schemas";
 
 type TaskResponse<Locals extends Record<string, unknown>> = Response<unknown, Locals>;
 
 export function createTasksController(service: TasksService) {
   return {
+    async search(_request: Request, response: TaskResponse<{ query: SearchTasksInput }>) {
+      const result = await service.search(response.locals.query);
+      response.json({ ...result, items: result.items.map(toTaskResponse) });
+    },
     async list(_request: Request, response: TaskResponse<{ query: ListTasksInput }>) {
       const tasks = await service.list(response.locals.query);
       response.json(tasks.map(toTaskResponse));

@@ -3,6 +3,178 @@
 Мінімальний backend на Express і TypeScript з Prisma 7.10.1 для Supabase Postgres.
 Потрібен Node.js 20.19+, 22.12+ або 24+ (підтримувані гілки Node.js).
 
+## Пошук поточних задач: `GET /api/tasks/search`
+
+Окремий endpoint повертає одну сторінку всіх неархівованих і невидалених
+Tasks, включно з Routine Tasks, DONE, CANCELED і SKIPPED. Підзадачі входять
+лише у повний DTO батьківської Task. Статичний маршрут стоїть перед `/:id`.
+Старий `GET /api/tasks` повертає масив; його query/DTO, Today, Backlog,
+Archive, мутації й автоматичне оновлення залишаються сумісними.
+
+Повний перелік query-параметрів:
+
+| Параметр | Значення та default |
+| --- | --- |
+| `q` | Рядок, default `""`. Literal substring лише назви: trim і нижній регістр `uk-UA`. Пробіли всередині зберігаються; `%` і `_` не є wildcard. Опис, підзадачі й назва сфери не беруть участі. |
+| `status` | `TODO`, `IN_PROGRESS`, `PAUSED`, `POSTPONED`, `DONE`, `CANCELED`, `SKIPPED`; без параметра — всі. |
+| `priority` | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; без параметра — всі. |
+| `area` | UUID сфери (регістр UUID неважливий) або `none` («Без сфери»); без параметра — всі. |
+| `sort` | `newest` (default), `oldest`, `deadline`, `priority`, `planning`, `completed`. |
+| `dateField` | `planning` (default), `due`, `created`, `completed`. Поле фільтра дат незалежне від `sort`. |
+| `from` | Необов'язкова включна календарна дата `YYYY-MM-DD`, роки 0001–9999. |
+| `to` | Необов'язкова включна календарна дата `YYYY-MM-DD`, роки 0001–9999. |
+| `timezone` | Чинна IANA timezone-валідація, default `UTC`, наприклад `Europe/Kyiv`. |
+| `page` | Десяткове ціле від 1 до 9007199254740991 (найбільше точне ціле JavaScript), default `1`. Offset обчислюється як BigInt. |
+| `pageSize` | `20`, `50`, `100`, default `20`. |
+
+Невідомі параметри, повторені значення, невалідні типи/значення, неможливі
+дати й `from > to` повертають 400. Порожні enum/UUID/date-параметри слід
+пропускати. `archived`, `view` та overdue-параметри сюди не входять.
+Назви фільтрів і перші чотири сортування перевірені за сусіднім frontend:
+`src/modules/tasks/model/task-filters.ts`. Для DTO-прапорця `isToday`
+використовуються timezone запиту й чинні defaults `overdueMode=limited`,
+`overdueDays=3`; формули Today/Backlog/summary не змінені.
+
+### Дати і порядок
+
+Без `from` і `to` фільтр дат відсутній, навіть за заданого `dateField`.
+`due` використовує `dueAt`, `created` — `createdAt`. `completed` використовує
+лише достовірний `completedAt` чинної DONE Task: повний ланцюжок
+CREATED/STATUS_CHANGED, identity, creation snapshot, час подій,
+послідовність статусів, однозначність переходів і чинний бюджет 10000 подій.
+Повторний DONE не пересуває дату; reopen прибирає completedAt, повторне
+завершення встановлює нову. Неповна/суперечлива історія, CANCELED і SKIPPED
+не мають completedAt. `updatedAt` не замінює його; `skippedAt` не є completedAt.
+
+Межі instant-полів: `[початок from у timezone, початок дня після to у timezone)`.
+Одна відсутня межа означає необмежений діапазон у той бік. Календарне
+додавання дня виконує Temporal, включно з DST, повтореною північчю і
+пропущеними місцевими днями, без фіксованих 24 годин. Остання мілісекунда
+`to` включається, початок наступного дня — ні.
+
+`planning`: `plannedAt` повністю замінює occurrence. Якщо особистого плану
+немає, береться повне вікно RoutineOccurrence від початку `startDate` до
+початку дня після `endDate` **у timezone occurrence**, незалежно від
+`instant`/`localTime`. Достатньо непорожнього перетину із запитаним
+діапазоном, включно із серединою багатоденного вікна. Без відповідної дати
+Task виключається лише за наявності `from` або `to`.
+
+| `sort` | Послідовність ключів |
+| --- | --- |
+| `newest` | `createdAt DESC`, `id ASC` |
+| `oldest` | `createdAt ASC`, `id ASC` |
+| `deadline` | `dueAt ASC NULLS LAST`, `createdAt DESC`, `id ASC` |
+| `priority` | `CRITICAL → HIGH → MEDIUM → LOW`, `createdAt DESC`, `id ASC` |
+| `planning` | `plannedAt`, а за його відсутності початок вікна occurrence: `ASC NULLS LAST`, `createdAt DESC`, `id ASC` |
+| `completed` | Достовірний `completedAt ASC NULLS LAST`, `createdAt DESC`, `id ASC` |
+
+Кожен порядок завершується унікальним `id`. Усі date-null йдуть наприкінці.
+
+### Пагінація, лічильники та приклади
+
+```http
+GET /api/tasks/search?q=звіт&status=IN_PROGRESS&priority=HIGH&area=none&sort=planning&dateField=planning&from=2026-10-25&to=2026-10-31&timezone=Europe%2FKyiv&page=1&pageSize=20
+GET /api/tasks/search?dateField=completed&from=2026-10-01&sort=completed&page=2&pageSize=50
+GET /api/tasks/search?area=550e8400-e29b-41d4-a716-446655440000&sort=deadline
+```
+
+Форма відповіді (за фільтрами нічого не знайдено, до фільтрів є 3 записи):
+
+```json
+{
+  "items": [],
+  "page": 1,
+  "pageSize": 20,
+  "totalItems": 0,
+  "totalPages": 0,
+  "hasPreviousPage": false,
+  "hasNextPage": false,
+  "summary": {
+    "totalItems": 3,
+    "counts": {
+      "TODO": 1, "IN_PROGRESS": 0, "PAUSED": 0, "POSTPONED": 0,
+      "DONE": 1, "CANCELED": 0, "SKIPPED": 1
+    }
+  },
+  "asOf": "2026-10-30T12:00:00.000Z"
+}
+```
+
+Кожний елемент `items` — повний чинний Task DTO, як у старого GET, із
+`area`, `routineOccurrence`, `subtasks`, `completedAt`, `skippedAt`,
+`isCompleted`, `isToday`, `isBacklog`, `summary` та всіма чинними полями.
+Журнал історії не є новим полем DTO. `summary.counts` завжди містить усі
+сім статусів, включно з нульовими; `summary.totalItems` — їх сума **до всіх
+користувацьких фільтрів**. Нових категорій статусів немає.
+`totalItems` — кількість **після всіх фільтрів**.
+`totalPages = ceil(totalItems / pageSize)`; для нуля це 0.
+`hasPreviousPage = totalItems > 0 && page > 1`, `hasNextPage = page < totalPages`.
+Для сторінки поза межами повертається `items=[]`, запитане `page` і справжні
+лічильники. Сторінка не підмінюється. «Показати ще» запитує наступний номер;
+накопичує результати frontend, backend повертає одну сторінку.
+
+`asOf` фіксується один раз на запит і використовується для історії та всіх
+DTO. Відбір, summary, metadata, hydration DTO/підзадач та історії сторінки
+читаються в одній наявній Serializable-транзакції з чинним retry.
+Окремі HTTP-запити сторінок **не утворюють спільного незмінного знімка**:
+між ними можливі мутації, зміщення, повтори чи пропуски при додаванні сторінок.
+
+### Спосіб відбору і перевірка
+
+SQL фільтрує й сортує до LIMIT/OFFSET, рахує відфільтрований total та
+нефільтровані статуси, повертає лише ID сторінки. Повні Tasks, їх підзадачі
+та summary-історія завантажуються лише для цих ID пакетно без N+1.
+Для completed SQL відтворює правила `analyzeTaskHistory`, обмежуючи журнал
+кожної DONE Task до 10001 запису (перевищення бюджету означає null).
+Завершення обчислюються **до** LIMIT/OFFSET.
+
+Коли потрібне completed, пакетний SELECT читає лише distinct рядки
+`CREATED.metadata.after.createdAt` активних DONE; спільний
+`creationSnapshotTime` зберігає семантику JS Date.parse. Коли потрібне
+planning, інший пакетний SELECT читає лише distinct `startDate/endDate/timezone`
+активних occurrence без особистого плану; Temporal визначає межі вікон.
+Компактні проєкції передаються в SQL як параметризований JSON; усі
+Task-фільтри/сортування/пагінація залишаються в БД. Повні журнали популяції
+в JavaScript не завантажуються. Вартість проєкцій залежить від кількості
+унікальних creation-рядків/вікон; completed replay — від історій DONE-кандидатів.
+Кешу немає. Schema, індекси та міграції не змінені: наявні індекси Task і
+TaskAction забезпечують базовий відбір та історію за taskId; необхідності
+нових індексів без профілю реального навантаження не встановлено.
+SQL використовує PostgreSQL та ICU collation `uk-x-icu` для frontend-сумісного
+пошуку. Інтеграційний тест перевіряє виконуваність на PostgreSQL 17 з ICU.
+
+```powershell
+npm run prisma:validate
+npm run build
+npm run test:typecheck
+# Лише окрема локальна тестова БД; .env/DATABASE_URL/DIRECT_URL тест не читає.
+$env:TASK_SEARCH_TEST_DATABASE_URL = 'postgresql://postgres@127.0.0.1:55437/postgres'
+node --import tsx --test tests/tasks-search*.test.ts
+```
+
+PostgreSQL-тест створює випадкову ізольовану schema, застосовує міграції
+тільки туди й видаляє її після тесту. Без явного `TASK_SEARCH_TEST_DATABASE_URL`
+інтеграційний тест пропускається. Є API-перевірки фільтрів, порядку,
+пагінації, DTO-сумісності, кількості queries, диференційна перевірка
+completed SQL проти helper і конкурентна мутація між selection та hydration.
+
+Ручний Postman-сценарій на тестових даних:
+
+1. Порівняйте `GET /api/tasks` (масив) і `/api/tasks/search` (envelope),
+   DTO однієї відомої Task і всі статуси у summary.
+2. Задайте `q`, `status`, `priority`, `area=<uuid>`, потім `area=none`;
+   звірте items/totalItems. Summary має залишитися тим самим.
+3. Задайте `dateField=planning`, діапазон і `timezone=Europe/Kyiv`.
+   Перевірте особистий plannedAt, occurrence без плану та `due` на останній
+   мілісекунді дня. Перевірте окремо лише `from` і лише `to`.
+4. Перемкніть усі шість `sort`; для completed перевірте DONE, reopen і
+   повторне завершення. Відсутні дати мають бути наприкінці.
+5. Запитайте `page=1`, `page=2`, останню та `page=999`; повторіть із
+   `pageSize=20/50/100`. Для `q=<відсутня назва>` перевірте нульові metadata.
+6. Надішліть `page=0`, `pageSize=30`, неможливу дату, `from > to`, невідому
+   timezone й повторений `status`: очікуйте 400. Між сторінками змініть Task
+   і перевірте, що новий запит бачить новий стан.
+
 ## Запуск
 
 ```powershell
